@@ -6,7 +6,7 @@ import PIL
 import torch
 
 from sam3.model import box_ops
-
+from sam3.model.sam3_image import Sam3Image
 from sam3.model.data_misc import FindStage, interpolate
 from torchvision.transforms import v2
 
@@ -14,7 +14,13 @@ from torchvision.transforms import v2
 class Sam3Processor:
     """ """
 
-    def __init__(self, model, resolution=1008, device="cuda", confidence_threshold=0.5):
+    def __init__(
+        self,
+        model: Sam3Image,
+        resolution=1008,
+        device="cuda",
+        confidence_threshold=0.5,
+    ):
         self.model = model
         self.resolution = resolution
         self.device = device
@@ -39,10 +45,22 @@ class Sam3Processor:
         )
 
     @torch.inference_mode()
-    def set_image(self, image, state=None):
-        """Sets the image on which we want to do predictions."""
+    def set_image(
+        self,
+        image: PIL.Image.Image | torch.Tensor | np.ndarray,
+        state: dict | None = None,
+    ) -> dict[str, any]:
+        """
+        Sets the image on which we want to do predictions.
+
+        画像を登録し、バックボーン（SAM3VLBackbone）の特徴量を計算してstateに保存する。
+
+        :param image: A PIL image or a tensor
+        :param state: An optional state dictionary to store intermediate results
+        :return: The updated state dictionary
+        """
         if state is None:
-            state = {}
+            state: dict = {}
 
         if isinstance(image, PIL.Image.Image):
             width, height = image.size
@@ -51,13 +69,17 @@ class Sam3Processor:
         else:
             raise ValueError("Image must be a PIL image or a tensor")
 
-        image = v2.functional.to_image(image).to(self.device)
-        image = self.transform(image).unsqueeze(0)
+        image: torch.Tensor = v2.functional.to_image(image).to(self.device)
+        image: torch.Tensor = self.transform(image).unsqueeze(0)  # (1,3,1008,1008)
 
         state["original_height"] = height
         state["original_width"] = width
+
+        # SAM3VLBackboneを通して、画像の特徴量リストと位置エンコードリスト、text特徴量などを取得しdictを得る。
         state["backbone_out"] = self.model.backbone.forward_image(image)
-        inst_interactivity_en = self.model.inst_interactive_predictor is not None
+
+        # SAM1/SAM2実装モード
+        inst_interactivity_en: bool = self.model.inst_interactive_predictor is not None
         if inst_interactivity_en and "sam2_backbone_out" in state["backbone_out"]:
             sam2_backbone_out = state["backbone_out"]["sam2_backbone_out"]
             sam2_backbone_out["backbone_fpn"][0] = self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s0(
@@ -69,10 +91,14 @@ class Sam3Processor:
         return state
 
     @torch.inference_mode()
-    def set_image_batch(self, images: List[np.ndarray], state=None):
+    def set_image_batch(
+        self,
+        images: list[PIL.Image.Image],
+        state: dict[str, any] | None = None,
+    ):
         """Sets the image batch on which we want to do predictions."""
         if state is None:
-            state = {}
+            state: dict[str, any] = {}
 
         if not isinstance(images, list):
             raise ValueError("Images must be a list of PIL images or tensors")
@@ -82,10 +108,20 @@ class Sam3Processor:
         state["original_heights"] = [image.height for image in images]
         state["original_widths"] = [image.width for image in images]
 
-        images = [self.transform(v2.functional.to_image(image).to(self.device)) for image in images]
-        images = torch.stack(images, dim=0)
+        # resize and normalize
+        images: list[torch.Tensor] = [
+            self.transform(
+                v2.functional.to_image(image).to(self.device),
+            )
+            for image in images
+        ]
+        images: torch.Tensor = torch.stack(images, dim=0)  # (B,3,1008,1008)
+
+        # SAM3VLBackboneを通して、画像の特徴量リストと位置エンコードリスト、text特徴量などを取得しdictを得る。
         state["backbone_out"] = self.model.backbone.forward_image(images)
-        inst_interactivity_en = self.model.inst_interactive_predictor is not None
+        inst_interactivity_en: bool = self.model.inst_interactive_predictor is not None
+
+        # SAM1/SAM2実装モード
         if inst_interactivity_en and "sam2_backbone_out" in state["backbone_out"]:
             sam2_backbone_out = state["backbone_out"]["sam2_backbone_out"]
             sam2_backbone_out["backbone_fpn"][0] = self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s0(
@@ -120,7 +156,12 @@ class Sam3Processor:
         return state
 
     @torch.inference_mode()
-    def _add_box_prompt(self, box: List, label: bool, state: Dict):
+    def _add_box_prompt(
+        self,
+        box: list[float],  # [x_center, y_center, width, height] normalized
+        label: bool,  # True for foreground, False for background
+        state: dict[str, any],
+    ):
         """Adds a box prompt and encodes it without running inference."""
         if "backbone_out" not in state:
             raise ValueError("You must call set_image before _add_box_prompt")
@@ -139,6 +180,7 @@ class Sam3Processor:
         labels = torch.tensor([label], device=self.device, dtype=torch.bool).view(1, 1)
         state["geometric_prompt"].append_boxes(boxes, labels)
 
+        # forward_grounding内で行っていたprompt encodingをここで実行するように変更
         # Encode prompts immediately
         with torch.profiler.record_function("SAM3Image._encode_prompt"):
             prompt, prompt_mask, backbone_out = self.model._encode_prompt(
@@ -153,8 +195,10 @@ class Sam3Processor:
         state["backbone_out"] = backbone_out
 
         # Remove geometric_prompt as we only rely on prompt and prompt_mask for inference
-        if "geometric_prompt" in state:
-            del state["geometric_prompt"]
+
+        # (260114) geometric_promptを削除しないようにコメントアウト
+        # if "geometric_prompt" in state:
+        #     del state["geometric_prompt"]
 
         return state
 
