@@ -9,15 +9,17 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from sam3.model.vitdet import ViT
+from sam3.model.position_encoding import PositionEmbeddingSine
 
 
 class Sam3DualViTDetNeck(nn.Module):
     def __init__(
         self,
-        trunk: nn.Module,
-        position_encoding: nn.Module,
-        d_model: int,
-        scale_factors=(4.0, 2.0, 1.0, 0.5),
+        trunk: ViT,
+        position_encoding: PositionEmbeddingSine,
+        d_model: int,  # 256
+        scale_factors: tuple[float] = (4.0, 2.0, 1.0, 0.5),
         add_sam2_neck: bool = False,
     ):
         """
@@ -30,16 +32,16 @@ class Sam3DualViTDetNeck(nn.Module):
         :param d_model: the dimension of the model
         """
         super().__init__()
-        self.trunk = trunk
-        self.position_encoding = position_encoding
-        self.convs = nn.ModuleList()
+        self.trunk: ViT = trunk
+        self.position_encoding: PositionEmbeddingSine = position_encoding
+        self.convs: nn.ModuleList = nn.ModuleList()
 
-        self.scale_factors = scale_factors
-        use_bias = True
+        self.scale_factors: tuple[float] = scale_factors
+        use_bias: bool = True
         dim: int = self.trunk.channel_list[-1]
 
         for _, scale in enumerate(scale_factors):
-            current = nn.Sequential()
+            current: nn.Sequential = nn.Sequential()
 
             if scale == 4.0:
                 current.add_module(
@@ -98,23 +100,25 @@ class Sam3DualViTDetNeck(nn.Module):
             # Assumes sam2 neck is just a clone of the original neck
             self.sam2_convs = deepcopy(self.convs)
 
-    def forward(
-        self, tensor_list: List[torch.Tensor]
-    ) -> Tuple[
-        List[torch.Tensor],
-        List[torch.Tensor],
-        Optional[List[torch.Tensor]],
-        Optional[List[torch.Tensor]],
+    def forward(self, tensor_list: list[torch.Tensor]) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor] | None,
+        list[torch.Tensor] | None,
     ]:
-        xs = self.trunk(tensor_list)
+        # ViTを通す
+        xs: list[torch.Tensor] = self.trunk(tensor_list)
+
         sam3_out, sam3_pos = [], []
         sam2_out, sam2_pos = None, None
         if self.sam2_convs is not None:
             sam2_out, sam2_pos = [], []
-        x = xs[-1]  # simpleFPN
+
+        # 最後のblockの出力を取得
+        x: torch.Tensor = xs[-1]  # simpleFPN
         for i in range(len(self.convs)):
-            sam3_x_out = self.convs[i](x)
-            sam3_pos_out = self.position_encoding(sam3_x_out).to(sam3_x_out.dtype)
+            sam3_x_out: torch.Tensor = self.convs[i](x)
+            sam3_pos_out: torch.Tensor = self.position_encoding(sam3_x_out).to(sam3_x_out.dtype)
             sam3_out.append(sam3_x_out)
             sam3_pos.append(sam3_pos_out)
 
@@ -123,4 +127,5 @@ class Sam3DualViTDetNeck(nn.Module):
                 sam2_pos_out = self.position_encoding(sam2_x_out).to(sam2_x_out.dtype)
                 sam2_out.append(sam2_x_out)
                 sam2_pos.append(sam2_pos_out)
+
         return sam3_out, sam3_pos, sam2_out, sam2_pos

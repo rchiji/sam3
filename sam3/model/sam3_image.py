@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
 import os
@@ -12,8 +14,12 @@ from sam3.model.model_misc import SAM3Output
 from sam3.model.sam1_task_predictor import SAM3InteractiveImagePredictor
 from sam3.model.vl_combiner import SAM3VLBackbone
 from sam3.perflib.nms import nms_masks
-
+from sam3.model.geometry_encoders import SequenceGeometryEncoder
+from sam3.model.model_misc import DotProductScoring, TransformerWrapper
+from sam3.model.maskformer_segmentation import UniversalSegmentationHead
+from sam3.train.matcher import BinaryHungarianMatcherV2
 from sam3.train.data.collator import BatchedDatapoint
+from sam3.model.data_misc import FindStage
 
 from .act_ckpt_utils import activation_ckpt_wrapper
 
@@ -41,82 +47,92 @@ class Sam3Image(torch.nn.Module):
     def __init__(
         self,
         backbone: SAM3VLBackbone,
-        transformer,
-        input_geometry_encoder,
-        segmentation_head=None,
-        num_feature_levels=1,
-        o2m_mask_predict=True,
-        dot_prod_scoring=None,
+        transformer: TransformerWrapper,
+        input_geometry_encoder: SequenceGeometryEncoder,
+        segmentation_head: UniversalSegmentationHead | None = None,
+        num_feature_levels: int = 1,
+        o2m_mask_predict: bool = True,
+        dot_prod_scoring: DotProductScoring | None = None,
         use_instance_query: bool = True,
         multimask_output: bool = True,
         use_act_checkpoint_seg_head: bool = True,
         interactivity_in_encoder: bool = True,
-        matcher=None,
-        use_dot_prod_scoring=True,
+        matcher: BinaryHungarianMatcherV2 | None = None,  # train mode only
+        use_dot_prod_scoring: bool = True,
         supervise_joint_box_scores: bool = False,  # only relevant if using presence token/score
         detach_presence_in_joint_score: bool = False,  # only relevant if using presence token/score
         separate_scorer_for_instance: bool = False,
         num_interactive_steps_val: int = 0,
-        inst_interactive_predictor: SAM3InteractiveImagePredictor = None,
+        inst_interactive_predictor: SAM3InteractiveImagePredictor | None = None,
         **kwargs,
     ):
         super().__init__()
-        self.backbone = backbone
-        self.geometry_encoder = input_geometry_encoder
-        self.transformer = transformer
-        self.hidden_dim = transformer.d_model
-        self.num_feature_levels = num_feature_levels
-        self.segmentation_head = segmentation_head
+        self.backbone: SAM3VLBackbone = backbone
+        self.geometry_encoder: SequenceGeometryEncoder = input_geometry_encoder
+        self.transformer: TransformerWrapper = transformer
+        self.hidden_dim: int = transformer.d_model
+        self.num_feature_levels: int = num_feature_levels
+        self.segmentation_head: UniversalSegmentationHead | None = segmentation_head
 
-        self.o2m_mask_predict = o2m_mask_predict
+        self.o2m_mask_predict: bool = o2m_mask_predict
 
-        self.dot_prod_scoring = dot_prod_scoring
-        self.use_act_checkpoint_seg_head = use_act_checkpoint_seg_head
-        self.interactivity_in_encoder = interactivity_in_encoder
-        self.matcher = matcher
+        self.dot_prod_scoring: DotProductScoring | None = dot_prod_scoring
+        self.use_act_checkpoint_seg_head: bool = use_act_checkpoint_seg_head
+        self.interactivity_in_encoder: bool = interactivity_in_encoder
+        self.matcher: BinaryHungarianMatcherV2 | None = matcher
 
-        self.num_interactive_steps_val = num_interactive_steps_val
-        self.use_dot_prod_scoring = use_dot_prod_scoring
+        self.num_interactive_steps_val: int = num_interactive_steps_val
+        self.use_dot_prod_scoring: bool = use_dot_prod_scoring
 
         if self.use_dot_prod_scoring:
             assert dot_prod_scoring is not None
-            self.dot_prod_scoring = dot_prod_scoring
-            self.instance_dot_prod_scoring = None
+            self.dot_prod_scoring: DotProductScoring = dot_prod_scoring
+            self.instance_dot_prod_scoring: DotProductScoring | None = None
             if separate_scorer_for_instance:
-                self.instance_dot_prod_scoring = deepcopy(dot_prod_scoring)
+                self.instance_dot_prod_scoring: DotProductScoring = deepcopy(dot_prod_scoring)
         else:
-            self.class_embed = torch.nn.Linear(self.hidden_dim, 1)
-            self.instance_class_embed = None
+            self.class_embed: torch.nn.Linear = torch.nn.Linear(self.hidden_dim, 1)
+            self.instance_class_embed: torch.nn.Linear | None = None
             if separate_scorer_for_instance:
-                self.instance_class_embed = deepcopy(self.class_embed)
+                self.instance_class_embed: torch.nn.Linear = deepcopy(self.class_embed)
 
-        self.supervise_joint_box_scores = supervise_joint_box_scores
-        self.detach_presence_in_joint_score = detach_presence_in_joint_score
+        self.supervise_joint_box_scores: bool = supervise_joint_box_scores
+        self.detach_presence_in_joint_score: bool = detach_presence_in_joint_score
 
         # verify the number of queries for O2O and O2M
-        num_o2o_static = self.transformer.decoder.num_queries
-        num_o2m_static = self.transformer.decoder.num_o2m_queries
+        num_o2o_static: int = self.transformer.decoder.num_queries
+        num_o2m_static: int = self.transformer.decoder.num_o2m_queries
         assert num_o2m_static == (num_o2o_static if self.transformer.decoder.dac else 0)
-        self.dac = self.transformer.decoder.dac
+        self.dac: bool = self.transformer.decoder.dac
 
-        self.use_instance_query = use_instance_query
-        self.multimask_output = multimask_output
+        self.use_instance_query: bool = use_instance_query
+        self.multimask_output: bool = multimask_output
 
-        self.inst_interactive_predictor = inst_interactive_predictor
+        self.inst_interactive_predictor: SAM3InteractiveImagePredictor | None = inst_interactive_predictor
 
     @property
     def device(self):
-        self._device = getattr(self, "_device", None) or next(self.parameters()).device
+        self._device: torch.device = getattr(self, "_device", None) or next(self.parameters()).device
         return self._device
 
     def to(self, *args, **kwargs):
         # clear cached _device in case the model is moved to a different device
-        self._device = None
+        self._device: torch.device | None = None
         return super().to(*args, **kwargs)
 
-    def _get_img_feats(self, backbone_out, img_ids):
-        """Retrieve correct image features from backbone output."""
+    def _get_img_feats(
+        self,
+        backbone_out: dict,
+        img_ids: int | torch.Tensor,
+    ) -> tuple[dict[str, torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[tuple[int, int]]]:
+        """
+        Retrieve correct image features from backbone output.
+
+        Sam3Processor.set_imageで得られるbackbone_outから使用する画像特徴を取り出す。
+        img_ids: 使用する画像特徴のインデックス。Sam3Processor.find_stageに記録されたものが渡される想定かな
+        """
         if "backbone_fpn" in backbone_out:
+            # 対応表があればID変換
             if "id_mapping" in backbone_out and backbone_out["id_mapping"] is not None:
                 img_ids = backbone_out["id_mapping"][img_ids]
                 # If this assert fails, it likely means we're requesting different img_ids (perhaps a different frame?)
@@ -124,12 +140,20 @@ class Sam3Image(torch.nn.Module):
                 # but likely at the cost of a cpu<->gpu sync point, which would deteriorate perf
                 torch._assert_async((img_ids >= 0).all())
 
-            vis_feats = backbone_out["backbone_fpn"][-self.num_feature_levels :]
-            vis_pos_enc = backbone_out["vision_pos_enc"][-self.num_feature_levels :]
-            vis_feat_sizes = [x.shape[-2:] for x in vis_pos_enc]  # (H, W) shapes
+            vis_feats: list[torch.Tensor] = backbone_out["backbone_fpn"][-self.num_feature_levels :]  # [(1,256,72,72)]
+            vis_pos_enc: list[torch.Tensor] = backbone_out["vision_pos_enc"][
+                -self.num_feature_levels :
+            ]  # [(1,256,72,72)]
+            vis_feat_sizes: list[tuple[int, int]] = [x.shape[-2:] for x in vis_pos_enc]  # [(72,72)]
+
             # index and flatten visual features NxCxHxW => HWxNxC (batch-first => seq-first)
-            img_feats = [x[img_ids].flatten(2).permute(2, 0, 1) for x in vis_feats]
-            img_pos_embeds = [x[img_ids].flatten(2).permute(2, 0, 1) for x in vis_pos_enc]
+            img_feats: list[torch.Tensor] = [
+                x[img_ids].flatten(2).permute(2, 0, 1) for x in vis_feats
+            ]  # [(5184,1,256)]
+            img_pos_embeds: list[torch.Tensor] = [
+                x[img_ids].flatten(2).permute(2, 0, 1) for x in vis_pos_enc
+            ]  # [(5184,1,256)]
+
             return backbone_out, img_feats, img_pos_embeds, vis_feat_sizes
 
         # Image features not available in backbone output, so we compute them on the fly
@@ -164,9 +188,9 @@ class Sam3Image(torch.nn.Module):
 
     def _encode_prompt(
         self,
-        backbone_out,
-        find_input,
-        geometric_prompt,
+        backbone_out: dict[str, torch.Tensor],
+        find_input: FindStage,
+        geometric_prompt: Prompt,
         visual_prompt_embed=None,
         visual_prompt_mask=None,
         encode_text=True,
@@ -174,52 +198,82 @@ class Sam3Image(torch.nn.Module):
     ):
         # index text features (note that regardless of early or late fusion, the batch size of
         # `txt_feats` is always the number of *prompts* in the encoder)
-        txt_ids = find_input.text_ids
-        txt_feats = backbone_out["language_features"][:, txt_ids]
-        txt_masks = backbone_out["language_mask"][txt_ids]
+        txt_ids: torch.Tensor = find_input.text_ids  # 0
+        txt_feats: torch.Tensor = backbone_out["language_features"][:, txt_ids]  # (32,256)
+        txt_masks: torch.Tensor = backbone_out["language_mask"][txt_ids]  # (32)
 
-        feat_tuple = self._get_img_feats(backbone_out, find_input.img_ids)
+        feat_tuple: tuple[dict[str, torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[tuple[int, int]]] = (
+            self._get_img_feats(
+                backbone_out,
+                find_input.img_ids,
+            )
+        )
+        img_feats: list[torch.Tensor]  # [(5184,1,256)]
         backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
 
         if prev_mask_pred is not None:
             img_feats = [img_feats[-1] + prev_mask_pred]
+
         # Encode geometry
+        geo_feats: torch.Tensor  # (n_box=1,1,256)
+        geo_masks: torch.Tensor  # (n_box=1,1)
         geo_feats, geo_masks = self.geometry_encoder(
             geo_prompt=geometric_prompt,
             img_feats=img_feats,
             img_sizes=vis_feat_sizes,
             img_pos_embeds=img_pos_embeds,
         )
+
         if visual_prompt_embed is None:
-            visual_prompt_embed = torch.zeros((0, *geo_feats.shape[1:]), device=geo_feats.device)
-            visual_prompt_mask = torch.zeros(
+            visual_prompt_embed: torch.Tensor = torch.zeros(
+                (0, *geo_feats.shape[1:]),
+                device=geo_feats.device,
+            )  # (0,1,256) --> catしても影響なし
+            visual_prompt_mask: torch.Tensor = torch.zeros(
                 (*geo_masks.shape[:-1], 0),
                 device=geo_masks.device,
                 dtype=geo_masks.dtype,
-            )
+            )  # (1,0)
+
         if encode_text:
-            prompt = torch.cat([txt_feats, geo_feats, visual_prompt_embed], dim=0)
-            prompt_mask = torch.cat([txt_masks, geo_masks, visual_prompt_mask], dim=1)
+            # text promptの埋め込み表現もcat
+            prompt: torch.Tensor = torch.cat(
+                [txt_feats, geo_feats, visual_prompt_embed],
+                dim=0,
+            )
+            prompt_mask: torch.Tensor = torch.cat(
+                [txt_masks, geo_masks, visual_prompt_mask],
+                dim=1,
+            )
         else:
-            prompt = torch.cat([geo_feats, visual_prompt_embed], dim=0)
-            prompt_mask = torch.cat([geo_masks, visual_prompt_mask], dim=1)
+            prompt: torch.Tensor = torch.cat(
+                [geo_feats, visual_prompt_embed],
+                dim=0,
+            )
+            prompt_mask: torch.Tensor = torch.cat(
+                [geo_masks, visual_prompt_mask],
+                dim=1,
+            )
         return prompt, prompt_mask, backbone_out
 
     def _run_encoder(
         self,
-        backbone_out,
-        find_input,
-        prompt,
-        prompt_mask,
-        encoder_extra_kwargs: Optional[Dict] = None,
+        backbone_out: dict[str, torch.Tensor],
+        find_input: FindStage,
+        prompt: torch.Tensor,
+        prompt_mask: torch.Tensor,
+        encoder_extra_kwargs: dict | None = None,
     ):
-        feat_tuple = self._get_img_feats(backbone_out, find_input.img_ids)
+        feat_tuple: tuple = self._get_img_feats(
+            backbone_out,
+            find_input.img_ids,
+        )
         backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
 
         # Run the encoder
-        prompt_pos_embed = torch.zeros_like(prompt)
+        prompt_pos_embed: torch.Tensor = torch.zeros_like(prompt)
         # make a copy of the image feature lists since the encoder may modify these lists in-place
-        memory = self.transformer.encoder(
+        memory: dict = self.transformer.encoder(
             src=img_feats.copy(),
             src_key_padding_mask=None,
             src_pos=img_pos_embeds.copy(),
@@ -419,8 +473,8 @@ class Sam3Image(torch.nn.Module):
         backbone_out,
         find_input,
         find_target,
-        prompt,
-        prompt_mask,
+        prompt: torch.Tensor,  # <-- Promptではなく、prompt embeddingsそのものを受け取るように変更
+        prompt_mask: torch.Tensor,  # <-- Promptではなく、prompt maskそのものを受け取るように変更
     ):
         # Run the encoder
         with torch.profiler.record_function("SAM3Image._run_encoder"):

@@ -97,7 +97,11 @@ def _create_vit_backbone(compile_mode=None):
     )
 
 
-def _create_vit_neck(position_encoding, vit_backbone, enable_inst_interactivity=False):
+def _create_vit_neck(
+    position_encoding: PositionEmbeddingSine,
+    vit_backbone: ViT,
+    enable_inst_interactivity=False,
+) -> Sam3DualViTDetNeck:
     """Create ViT neck for feature pyramid."""
     return Sam3DualViTDetNeck(
         position_encoding=position_encoding,
@@ -108,9 +112,16 @@ def _create_vit_neck(position_encoding, vit_backbone, enable_inst_interactivity=
     )
 
 
-def _create_vl_backbone(vit_neck, text_encoder):
+def _create_vl_backbone(
+    vit_neck: Sam3DualViTDetNeck,
+    text_encoder: VETextEncoder,
+) -> SAM3VLBackbone:
     """Create visual-language backbone."""
-    return SAM3VLBackbone(visual=vit_neck, text=text_encoder, scalp=1)
+    return SAM3VLBackbone(
+        visual=vit_neck,
+        text=text_encoder,
+        scalp=1,  # <-- scale=0.5の特徴量を廃棄してscale=1以降を使用
+    )
 
 
 def _create_transformer_encoder() -> TransformerEncoderFusion:
@@ -188,7 +199,7 @@ def _create_transformer_decoder() -> TransformerDecoder:
     return decoder
 
 
-def _create_dot_product_scoring():
+def _create_dot_product_scoring() -> DotProductScoring:
     """Create dot product scoring module."""
     prompt_mlp = MLP(
         input_dim=256,
@@ -202,7 +213,7 @@ def _create_dot_product_scoring():
     return DotProductScoring(d_model=256, d_proj=256, prompt_mlp=prompt_mlp)
 
 
-def _create_segmentation_head(compile_mode=None):
+def _create_segmentation_head(compile_mode=None) -> UniversalSegmentationHead:
     """Create segmentation head with pixel decoder."""
     pixel_decoder = PixelDecoder(
         num_upsampling_stages=3,
@@ -230,10 +241,12 @@ def _create_segmentation_head(compile_mode=None):
     return segmentation_head
 
 
-def _create_geometry_encoder():
+def _create_geometry_encoder() -> SequenceGeometryEncoder:
     """Create geometry encoder with all its components."""
+
     # Create position encoding for geometry encoder
-    geo_pos_enc = _create_position_encoding()
+    geo_pos_enc: PositionEmbeddingSine = _create_position_encoding()
+
     # Create CX block for fuser
     cx_block = CXBlock(
         dim=256,
@@ -287,14 +300,14 @@ def _create_geometry_encoder():
 
 
 def _create_sam3_model(
-    backbone,
-    transformer,
-    input_geometry_encoder,
-    segmentation_head,
-    dot_prod_scoring,
-    inst_interactive_predictor,
-    eval_mode,
-):
+    backbone: SAM3VLBackbone,
+    transformer: TransformerWrapper,
+    input_geometry_encoder: SequenceGeometryEncoder,
+    segmentation_head: UniversalSegmentationHead | None,
+    dot_prod_scoring: DotProductScoring,
+    inst_interactive_predictor: SAM3InteractiveImagePredictor | None,
+    eval_mode: bool,
+) -> Sam3Image:
     """Create the SAM3 image model."""
     common_params = {
         "backbone": backbone,
@@ -323,7 +336,7 @@ def _create_sam3_model(
             stable=False,
         )
     common_params["matcher"] = matcher
-    model = Sam3Image(**common_params)
+    model: Sam3Image = Sam3Image(**common_params)
 
     return model
 
@@ -509,7 +522,9 @@ def _create_vision_backbone(compile_mode=None, enable_inst_interactivity=True) -
     return vit_neck
 
 
-def _create_sam3_transformer(has_presence_token: bool = True) -> TransformerWrapper:
+def _create_sam3_transformer(
+    has_presence_token: bool = True,
+) -> TransformerWrapper:
     """Create SAM3 transformer encoder and decoder."""
     encoder: TransformerEncoderFusion = _create_transformer_encoder()
     decoder: TransformerDecoder = _create_transformer_decoder()
@@ -543,15 +558,15 @@ def _setup_device_and_mode(model, device, eval_mode):
 
 
 def build_sam3_image_model(
-    bpe_path=None,
-    device="cuda" if torch.cuda.is_available() else "cpu",
-    eval_mode=True,
-    checkpoint_path=None,
-    load_from_HF=True,
-    enable_segmentation=True,
-    enable_inst_interactivity=False,
-    compile=False,
-):
+    bpe_path: str | None = None,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    eval_mode: bool = True,
+    checkpoint_path: str | None = None,
+    load_from_HF: bool = True,
+    enable_segmentation: bool = True,
+    enable_inst_interactivity: bool = False,
+    compile: bool = False,
+) -> Sam3Image:
     """
     Build SAM3 image model
 
@@ -571,35 +586,43 @@ def build_sam3_image_model(
         bpe_path = str(files("sam3").joinpath("assets/bpe_simple_vocab_16e6.txt.gz"))
 
     # Create visual components
-    compile_mode = "default" if compile else None
-    vision_encoder = _create_vision_backbone(
-        compile_mode=compile_mode, enable_inst_interactivity=enable_inst_interactivity
+    compile_mode: str = "default" if compile else None
+    vision_encoder: Sam3DualViTDetNeck = _create_vision_backbone(
+        compile_mode=compile_mode,
+        enable_inst_interactivity=enable_inst_interactivity,
     )
 
     # Create text components
-    text_encoder = _create_text_encoder(bpe_path)
+    text_encoder: VETextEncoder = _create_text_encoder(bpe_path)
 
     # Create visual-language backbone
-    backbone = _create_vl_backbone(vision_encoder, text_encoder)
+    backbone: SAM3VLBackbone = _create_vl_backbone(
+        vision_encoder,
+        text_encoder,
+    )
 
     # Create transformer components
-    transformer = _create_sam3_transformer()
+    transformer: TransformerWrapper = _create_sam3_transformer()
 
     # Create dot product scoring
-    dot_prod_scoring = _create_dot_product_scoring()
+    dot_prod_scoring: DotProductScoring = _create_dot_product_scoring()
 
     # Create segmentation head if enabled
-    segmentation_head = _create_segmentation_head(compile_mode=compile_mode) if enable_segmentation else None
+    segmentation_head: Optional[UniversalSegmentationHead] = (
+        _create_segmentation_head(compile_mode=compile_mode) if enable_segmentation else None
+    )
 
     # Create geometry encoder
-    input_geometry_encoder = _create_geometry_encoder()
+    input_geometry_encoder: SequenceGeometryEncoder = _create_geometry_encoder()
+
+    # Create instance interactivity predictor if enabled
+    inst_predictor: SAM3InteractiveImagePredictor | None = None
     if enable_inst_interactivity:
         sam3_pvs_base = build_tracker(apply_temporal_disambiguation=False)
         inst_predictor = SAM3InteractiveImagePredictor(sam3_pvs_base)
-    else:
-        inst_predictor = None
+
     # Create the SAM3 model
-    model = _create_sam3_model(
+    model: Sam3Image = _create_sam3_model(
         backbone,
         transformer,
         input_geometry_encoder,
@@ -609,13 +632,13 @@ def build_sam3_image_model(
         eval_mode,
     )
     if load_from_HF and checkpoint_path is None:
-        checkpoint_path = download_ckpt_from_hf()
+        checkpoint_path: str = download_ckpt_from_hf()
     # Load checkpoint if provided
     if checkpoint_path is not None:
         _load_checkpoint(model, checkpoint_path)
 
     # Setup device and mode
-    model = _setup_device_and_mode(model, device, eval_mode)
+    model: Sam3Image = _setup_device_and_mode(model, device, eval_mode)
 
     return model
 
