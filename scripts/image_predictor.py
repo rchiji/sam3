@@ -44,9 +44,9 @@ def text_prompt_example(processor, image):
     plot_results(image, inference_state)
     plt.title("Text Prompt: 'shoe' Segmentation")
     plt.axis("off")
-    plt.savefig("text_prompt_segmentation.png", bbox_inches="tight", dpi=150)
+    plt.savefig(f"{sam3_root}/assets/images/text_prompt_segmentation.png", bbox_inches="tight", dpi=150)
     plt.close()
-    print("Saved text prompt results to text_prompt_segmentation.png")
+    print(f"Saved text prompt results to {sam3_root}/assets/images/text_prompt_segmentation.png")
 
 
 def single_box_example(processor, image, width, height):
@@ -69,9 +69,9 @@ def single_box_example(processor, image, width, height):
     plot_results(image, inference_state)
     plt.title("Box Prompt Segmentation")
     plt.axis("off")
-    plt.savefig("box_prompt_segmentation.png", bbox_inches="tight", dpi=150)
+    plt.savefig(f"{sam3_root}/assets/images/box_prompt_segmentation.png", bbox_inches="tight", dpi=150)
     plt.close()
-    print("Saved box prompt segmentation results to box_prompt_segmentation.png")
+    print(f"Saved box prompt segmentation results to {sam3_root}/assets/images/box_prompt_segmentation.png")
 
 
 def single_box_reuse_example(processor, image, width, height):
@@ -119,7 +119,7 @@ def single_box_reuse_example(processor, image, width, height):
         plot_results(modified_image, fresh_inference_state)
         plt.title(f"Box Prompt Reused on {name.capitalize()} Image")
         plt.axis("off")
-        filename = f"box_prompt_reused_{name}_segmentation.png"
+        filename = f"{sam3_root}/assets/images/box_prompt_reused_{name}_segmentation.png"
         plt.savefig(filename, bbox_inches="tight", dpi=150)
         plt.close()
         print(f"Saved {name} reused prompt segmentation results to {filename}")
@@ -157,9 +157,11 @@ def cross_image_reuse_example(processor, image1, image2, width1, height1):
     plot_results(image2, inference_state2)
     plt.title("Box Prompt Reused from Image 1 on Image 2")
     plt.axis("off")
-    plt.savefig("box_prompt_cross_image_segmentation.png", bbox_inches="tight", dpi=150)
+    plt.savefig(f"{sam3_root}/assets/images/box_prompt_cross_image_segmentation.png", bbox_inches="tight", dpi=150)
     plt.close()
-    print("Saved cross-image reused prompt segmentation results to box_prompt_cross_image_segmentation.png")
+    print(
+        f"Saved cross-image reused prompt segmentation results to {sam3_root}/assets/images/box_prompt_cross_image_segmentation.png"
+    )
 
 
 def multiple_boxes_example(processor, image, width, height):
@@ -185,9 +187,9 @@ def multiple_boxes_example(processor, image, width, height):
     plot_results(img0, inference_state)
     plt.title("Multiple Boxes Segmentation")
     plt.axis("off")
-    plt.savefig("multiple_boxes_segmentation.png", bbox_inches="tight", dpi=150)
+    plt.savefig(f"{sam3_root}/assets/images/multiple_boxes_segmentation.png", bbox_inches="tight", dpi=150)
     plt.close()
-    print("Saved multiple boxes segmentation to multiple_boxes_segmentation.png")
+    print(f"Saved multiple boxes segmentation to {sam3_root}/assets/images/multiple_boxes_segmentation.png")
 
 
 def main():
@@ -209,21 +211,20 @@ def main():
 
     # Run all examples
     text_prompt_example(processor, image)
-    single_box_example(processor, image, width, height)
-    single_box_reuse_example(processor, image, width, height)
-    cross_image_reuse_example(processor, image, image2, width, height)
-    multiple_boxes_example(processor, image, width, height)
-
-    print("\nInference test completed successfully!")
     print("Results saved to:")
-    print("- text_prompt_segmentation.png")
-    print("- box_prompt_segmentation.png")
-    print("- box_prompt_reused_flipped_segmentation.png")
-    print("- box_prompt_reused_cropped_segmentation.png")
-    print("- box_prompt_reused_resized_segmentation.png")
-    print("- box_prompt_reused_grayscale_segmentation.png")
-    print("- box_prompt_cross_image_segmentation.png")
-    print("- multiple_boxes_segmentation.png")
+    print(f"- {sam3_root}/assets/images/text_prompt_segmentation.png")
+    single_box_example(processor, image, width, height)
+    print(f"- {sam3_root}/assets/images/box_prompt_segmentation.png")
+    single_box_reuse_example(processor, image, width, height)
+    print(f"- {sam3_root}/assets/images/box_prompt_reused_flipped_segmentation.png")
+    print(f"- {sam3_root}/assets/images/box_prompt_reused_cropped_segmentation.png")
+    print(f"- {sam3_root}/assets/images/box_prompt_reused_resized_segmentation.png")
+    print(f"- {sam3_root}/assets/images/box_prompt_reused_grayscale_segmentation.png")
+    cross_image_reuse_example(processor, image, image2, width, height)
+    print(f"- {sam3_root}/assets/images/box_prompt_cross_image_segmentation.png")
+    multiple_boxes_example(processor, image, width, height)
+    print(f"- {sam3_root}/assets/images/multiple_boxes_segmentation.png")
+    print("\nInference test completed successfully!")
 
 
 if __name__ == "__main__":
