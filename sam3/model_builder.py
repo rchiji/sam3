@@ -1,11 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 import os
 from typing import Optional
+from importlib.resources import files
 
-import pkg_resources
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
@@ -342,9 +340,7 @@ def _create_tracker_maskmem_backbone():
     )
 
     # Mask processing components
-    mask_downsampler = SimpleMaskDownSampler(
-        kernel_size=3, stride=2, padding=1, interpol_size=[1152, 1152]
-    )
+    mask_downsampler = SimpleMaskDownSampler(kernel_size=3, stride=2, padding=1, interpol_size=[1152, 1152])
 
     cx_block_layer = CXBlock(
         dim=256,
@@ -498,9 +494,7 @@ def _create_text_encoder(bpe_path: str) -> VETextEncoder:
     )
 
 
-def _create_vision_backbone(
-    compile_mode=None, enable_inst_interactivity=True
-) -> Sam3DualViTDetNeck:
+def _create_vision_backbone(compile_mode=None, enable_inst_interactivity=True) -> Sam3DualViTDetNeck:
     """Create SAM3 visual backbone with ViT and neck."""
     # Position encoding
     position_encoding = _create_position_encoding(precompute_resolution=1008)
@@ -529,23 +523,14 @@ def _load_checkpoint(model, checkpoint_path):
         ckpt = torch.load(f, map_location="cpu", weights_only=True)
     if "model" in ckpt and isinstance(ckpt["model"], dict):
         ckpt = ckpt["model"]
-    sam3_image_ckpt = {
-        k.replace("detector.", ""): v for k, v in ckpt.items() if "detector" in k
-    }
+    sam3_image_ckpt = {k.replace("detector.", ""): v for k, v in ckpt.items() if "detector" in k}
     if model.inst_interactive_predictor is not None:
         sam3_image_ckpt.update(
-            {
-                k.replace("tracker.", "inst_interactive_predictor.model."): v
-                for k, v in ckpt.items()
-                if "tracker" in k
-            }
+            {k.replace("tracker.", "inst_interactive_predictor.model."): v for k, v in ckpt.items() if "tracker" in k}
         )
     missing_keys, _ = model.load_state_dict(sam3_image_ckpt, strict=False)
     if len(missing_keys) > 0:
-        print(
-            f"loaded {checkpoint_path} and found "
-            f"missing and/or unexpected keys:\n{missing_keys=}"
-        )
+        print(f"loaded {checkpoint_path} and found " f"missing and/or unexpected keys:\n{missing_keys=}")
 
 
 def _setup_device_and_mode(model, device, eval_mode):
@@ -583,9 +568,7 @@ def build_sam3_image_model(
         A SAM3 image model
     """
     if bpe_path is None:
-        bpe_path = pkg_resources.resource_filename(
-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
-        )
+        bpe_path = str(files("sam3").joinpath("assets/bpe_simple_vocab_16e6.txt.gz"))
 
     # Create visual components
     compile_mode = "default" if compile else None
@@ -606,11 +589,7 @@ def build_sam3_image_model(
     dot_prod_scoring = _create_dot_product_scoring()
 
     # Create segmentation head if enabled
-    segmentation_head = (
-        _create_segmentation_head(compile_mode=compile_mode)
-        if enable_segmentation
-        else None
-    )
+    segmentation_head = _create_segmentation_head(compile_mode=compile_mode) if enable_segmentation else None
 
     # Create geometry encoder
     input_geometry_encoder = _create_geometry_encoder()
@@ -672,9 +651,7 @@ def build_sam3_video_model(
         Sam3VideoInferenceWithInstanceInteractivity: The instantiated dense tracking model
     """
     if bpe_path is None:
-        bpe_path = pkg_resources.resource_filename(
-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
-        )
+        bpe_path = str(files("sam3").joinpath("assets/bpe_simple_vocab_16e6.txt.gz"))
 
     # Build Tracker module
     tracker = build_tracker(apply_temporal_disambiguation=apply_temporal_disambiguation)
@@ -697,9 +674,7 @@ def build_sam3_video_model(
         residual=True,
         out_norm=nn.LayerNorm(256),
     )
-    main_dot_prod_scoring = DotProductScoring(
-        d_model=256, d_proj=256, prompt_mlp=main_dot_prod_mlp
-    )
+    main_dot_prod_scoring = DotProductScoring(d_model=256, d_proj=256, prompt_mlp=main_dot_prod_mlp)
 
     # Build Detector module
     detector = Sam3ImageOnVideoMultiGPU(
@@ -779,9 +754,7 @@ def build_sam3_video_model(
         if "model" in ckpt and isinstance(ckpt["model"], dict):
             ckpt = ckpt["model"]
 
-        missing_keys, unexpected_keys = model.load_state_dict(
-            ckpt, strict=strict_state_dict_loading
-        )
+        missing_keys, unexpected_keys = model.load_state_dict(ckpt, strict=strict_state_dict_loading)
         if missing_keys:
             print(f"Missing keys: {missing_keys}")
         if unexpected_keys:
@@ -792,6 +765,4 @@ def build_sam3_video_model(
 
 
 def build_sam3_video_predictor(*model_args, gpus_to_use=None, **model_kwargs):
-    return Sam3VideoPredictorMultiGPU(
-        *model_args, gpus_to_use=gpus_to_use, **model_kwargs
-    )
+    return Sam3VideoPredictorMultiGPU(*model_args, gpus_to_use=gpus_to_use, **model_kwargs)

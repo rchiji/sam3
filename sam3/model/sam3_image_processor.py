@@ -1,12 +1,12 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
-
-# pyre-unsafe
 from typing import Dict, List
 
 import numpy as np
 import PIL
 import torch
+
 from sam3.model import box_ops
+
 from sam3.model.data_misc import FindStage, interpolate
 from torchvision.transforms import v2
 
@@ -60,15 +60,11 @@ class Sam3Processor:
         inst_interactivity_en = self.model.inst_interactive_predictor is not None
         if inst_interactivity_en and "sam2_backbone_out" in state["backbone_out"]:
             sam2_backbone_out = state["backbone_out"]["sam2_backbone_out"]
-            sam2_backbone_out["backbone_fpn"][0] = (
-                self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s0(
-                    sam2_backbone_out["backbone_fpn"][0]
-                )
+            sam2_backbone_out["backbone_fpn"][0] = self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s0(
+                sam2_backbone_out["backbone_fpn"][0]
             )
-            sam2_backbone_out["backbone_fpn"][1] = (
-                self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s1(
-                    sam2_backbone_out["backbone_fpn"][1]
-                )
+            sam2_backbone_out["backbone_fpn"][1] = self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s1(
+                sam2_backbone_out["backbone_fpn"][1]
             )
         return state
 
@@ -81,66 +77,60 @@ class Sam3Processor:
         if not isinstance(images, list):
             raise ValueError("Images must be a list of PIL images or tensors")
         assert len(images) > 0, "Images list must not be empty"
-        assert isinstance(images[0], PIL.Image.Image), (
-            "Images must be a list of PIL images"
-        )
+        assert isinstance(images[0], PIL.Image.Image), "Images must be a list of PIL images"
 
         state["original_heights"] = [image.height for image in images]
         state["original_widths"] = [image.width for image in images]
 
-        images = [
-            self.transform(v2.functional.to_image(image).to(self.device))
-            for image in images
-        ]
+        images = [self.transform(v2.functional.to_image(image).to(self.device)) for image in images]
         images = torch.stack(images, dim=0)
         state["backbone_out"] = self.model.backbone.forward_image(images)
         inst_interactivity_en = self.model.inst_interactive_predictor is not None
         if inst_interactivity_en and "sam2_backbone_out" in state["backbone_out"]:
             sam2_backbone_out = state["backbone_out"]["sam2_backbone_out"]
-            sam2_backbone_out["backbone_fpn"][0] = (
-                self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s0(
-                    sam2_backbone_out["backbone_fpn"][0]
-                )
+            sam2_backbone_out["backbone_fpn"][0] = self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s0(
+                sam2_backbone_out["backbone_fpn"][0]
             )
-            sam2_backbone_out["backbone_fpn"][1] = (
-                self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s1(
-                    sam2_backbone_out["backbone_fpn"][1]
-                )
+            sam2_backbone_out["backbone_fpn"][1] = self.model.inst_interactive_predictor.model.sam_mask_decoder.conv_s1(
+                sam2_backbone_out["backbone_fpn"][1]
             )
         return state
 
     @torch.inference_mode()
-    def set_text_prompt(self, prompt: str, state: Dict):
-        """Sets the text prompt and run the inference"""
-
+    def _add_text_prompt(self, prompt: str, state: Dict):
+        """Adds a text prompt and encodes it without running inference."""
         if "backbone_out" not in state:
-            raise ValueError("You must call set_image before set_text_prompt")
+            raise ValueError("You must call set_image before _add_text_prompt")
 
         text_outputs = self.model.backbone.forward_text([prompt], device=self.device)
         # will erase the previous text prompt if any
         state["backbone_out"].update(text_outputs)
-        if "geometric_prompt" not in state:
-            state["geometric_prompt"] = self.model._get_dummy_prompt()
 
-        return self._forward_grounding(state)
+        # Create dummy geometric prompt and encode
+        geometric_prompt = self.model._get_dummy_prompt()
+        with torch.profiler.record_function("SAM3Image._encode_prompt"):
+            prompt_encoded, prompt_mask, backbone_out = self.model._encode_prompt(
+                backbone_out=state["backbone_out"], find_input=self.find_stage, geometric_prompt=geometric_prompt
+            )
+
+        state["prompt"] = prompt_encoded
+        state["prompt_mask"] = prompt_mask
+        state["backbone_out"] = backbone_out
+
+        return state
 
     @torch.inference_mode()
-    def add_geometric_prompt(self, box: List, label: bool, state: Dict):
-        """Adds a box prompt and run the inference.
-        The image needs to be set, but not necessarily the text prompt.
-        The box is assumed to be in [center_x, center_y, width, height] format and normalized in [0, 1] range.
-        The label is True for a positive box, False for a negative box.
-        """
+    def _add_box_prompt(self, box: List, label: bool, state: Dict):
+        """Adds a box prompt and encodes it without running inference."""
         if "backbone_out" not in state:
-            raise ValueError("You must call set_image before set_text_prompt")
+            raise ValueError("You must call set_image before _add_box_prompt")
 
         if "language_features" not in state["backbone_out"]:
             # Looks like we don't have a text prompt yet. This is allowed, but we need to set the text prompt to "visual" for the model to rely only on the geometric prompt
-            dummy_text_outputs = self.model.backbone.forward_text(
-                ["visual"], device=self.device
-            )
+            dummy_text_outputs = self.model.backbone.forward_text(["visual"], device=self.device)
             state["backbone_out"].update(dummy_text_outputs)
 
+        # Initialize geometric prompt if needed
         if "geometric_prompt" not in state:
             state["geometric_prompt"] = self.model._get_dummy_prompt()
 
@@ -149,7 +139,24 @@ class Sam3Processor:
         labels = torch.tensor([label], device=self.device, dtype=torch.bool).view(1, 1)
         state["geometric_prompt"].append_boxes(boxes, labels)
 
-        return self._forward_grounding(state)
+        # Encode prompts immediately
+        with torch.profiler.record_function("SAM3Image._encode_prompt"):
+            prompt, prompt_mask, backbone_out = self.model._encode_prompt(
+                backbone_out=state["backbone_out"],
+                find_input=self.find_stage,
+                geometric_prompt=state["geometric_prompt"],
+            )
+
+        # Store encoded prompts directly in state
+        state["prompt"] = prompt
+        state["prompt_mask"] = prompt_mask
+        state["backbone_out"] = backbone_out
+
+        # Remove geometric_prompt as we only rely on prompt and prompt_mask for inference
+        if "geometric_prompt" in state:
+            del state["geometric_prompt"]
+
+        return state
 
     def reset_all_prompts(self, state: Dict):
         """Removes all the prompts and results"""
@@ -163,7 +170,7 @@ class Sam3Processor:
                 if key in state["backbone_out"]:
                     del state["backbone_out"][key]
 
-        keys_to_del = ["geometric_prompt", "boxes", "masks", "masks_logits", "scores"]
+        keys_to_del = ["geometric_prompt", "prompt", "prompt_mask", "boxes", "masks", "masks_logits", "scores"]
         for key in keys_to_del:
             if key in state:
                 del state[key]
@@ -179,12 +186,26 @@ class Sam3Processor:
             return self._forward_grounding(state)
         return state
 
+    # Public API for inference
+    @torch.inference_mode()
+    def set_text_prompt(self, prompt: str, state: Dict):
+        """Sets the text prompt and run the inference."""
+        self._add_text_prompt(prompt, state)
+        return self._forward_grounding(state)
+
+    @torch.inference_mode()
+    def add_geometric_prompt(self, box: List, label: bool, state: Dict):
+        """Adds a box prompt and run the inference."""
+        self._add_box_prompt(box, label, state)
+        return self._forward_grounding(state)
+
     @torch.inference_mode()
     def _forward_grounding(self, state: Dict):
         outputs = self.model.forward_grounding(
             backbone_out=state["backbone_out"],
             find_input=self.find_stage,
-            geometric_prompt=state["geometric_prompt"],
+            prompt=state["prompt"],
+            prompt_mask=state["prompt_mask"],
             find_target=None,
         )
 

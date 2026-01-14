@@ -1,21 +1,24 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-# pyre-unsafe
-
 import os
 from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+
 from sam3.model.model_misc import SAM3Output
+
 from sam3.model.sam1_task_predictor import SAM3InteractiveImagePredictor
 from sam3.model.vl_combiner import SAM3VLBackbone
 from sam3.perflib.nms import nms_masks
+
 from sam3.train.data.collator import BatchedDatapoint
 
 from .act_ckpt_utils import activation_ckpt_wrapper
+
 from .box_ops import box_cxcywh_to_xyxy
+
 from .geometry_encoders import Prompt
 from .model_misc import inverse_sigmoid
 
@@ -126,9 +129,7 @@ class Sam3Image(torch.nn.Module):
             vis_feat_sizes = [x.shape[-2:] for x in vis_pos_enc]  # (H, W) shapes
             # index and flatten visual features NxCxHxW => HWxNxC (batch-first => seq-first)
             img_feats = [x[img_ids].flatten(2).permute(2, 0, 1) for x in vis_feats]
-            img_pos_embeds = [
-                x[img_ids].flatten(2).permute(2, 0, 1) for x in vis_pos_enc
-            ]
+            img_pos_embeds = [x[img_ids].flatten(2).permute(2, 0, 1) for x in vis_pos_enc]
             return backbone_out, img_feats, img_pos_embeds, vis_feat_sizes
 
         # Image features not available in backbone output, so we compute them on the fly
@@ -151,9 +152,7 @@ class Sam3Image(torch.nn.Module):
         # `img_batch` might be fp16 and offloaded to CPU
         image = image.to(dtype=torch.float32, device=self.device)
         # Next time we call this function, we want to remember which indices we computed
-        id_mapping = torch.full(
-            (len(img_batch),), -1, dtype=torch.long, device=self.device
-        )
+        id_mapping = torch.full((len(img_batch),), -1, dtype=torch.long, device=self.device)
         id_mapping[unique_ids] = torch.arange(len(unique_ids), device=self.device)
         backbone_out = {
             **backbone_out,
@@ -192,9 +191,7 @@ class Sam3Image(torch.nn.Module):
             img_pos_embeds=img_pos_embeds,
         )
         if visual_prompt_embed is None:
-            visual_prompt_embed = torch.zeros(
-                (0, *geo_feats.shape[1:]), device=geo_feats.device
-            )
+            visual_prompt_embed = torch.zeros((0, *geo_feats.shape[1:]), device=geo_feats.device)
             visual_prompt_mask = torch.zeros(
                 (*geo_masks.shape[:-1], 0),
                 device=geo_masks.device,
@@ -263,21 +260,19 @@ class Sam3Image(torch.nn.Module):
         tgt = query_embed.unsqueeze(1).repeat(1, bs, 1)
 
         apply_dac = self.transformer.decoder.dac and self.training
-        hs, reference_boxes, dec_presence_out, dec_presence_feats = (
-            self.transformer.decoder(
-                tgt=tgt,
-                memory=memory,
-                memory_key_padding_mask=src_mask,
-                pos=pos_embed,
-                reference_boxes=None,
-                level_start_index=encoder_out["level_start_index"],
-                spatial_shapes=encoder_out["spatial_shapes"],
-                valid_ratios=encoder_out["valid_ratios"],
-                tgt_mask=None,
-                memory_text=prompt,
-                text_attention_mask=prompt_mask,
-                apply_dac=apply_dac,
-            )
+        hs, reference_boxes, dec_presence_out, dec_presence_feats = self.transformer.decoder(
+            tgt=tgt,
+            memory=memory,
+            memory_key_padding_mask=src_mask,
+            pos=pos_embed,
+            reference_boxes=None,
+            level_start_index=encoder_out["level_start_index"],
+            spatial_shapes=encoder_out["spatial_shapes"],
+            valid_ratios=encoder_out["valid_ratios"],
+            tgt_mask=None,
+            memory_text=prompt,
+            text_attention_mask=prompt_mask,
+            apply_dac=apply_dac,
         )
         hs = hs.transpose(1, 2)  # seq-first to batch-first
         reference_boxes = reference_boxes.transpose(1, 2)  # seq-first to batch-first
@@ -325,10 +320,7 @@ class Sam3Image(torch.nn.Module):
 
         # box prediction
         box_head = self.transformer.decoder.bbox_embed
-        if (
-            is_instance_prompt
-            and self.transformer.decoder.instance_bbox_embed is not None
-        ):
+        if is_instance_prompt and self.transformer.decoder.instance_bbox_embed is not None:
             box_head = self.transformer.decoder.instance_bbox_embed
         anchor_box_offsets = box_head(hs)
         reference_boxes_inv_sig = inverse_sigmoid(reference_boxes)
@@ -336,9 +328,7 @@ class Sam3Image(torch.nn.Module):
         outputs_boxes_xyxy = box_cxcywh_to_xyxy(outputs_coord)
 
         if dec_presence_out is not None:
-            _update_out(
-                out, "presence_logit_dec", dec_presence_out, update_aux=self.training
-            )
+            _update_out(out, "presence_logit_dec", dec_presence_out, update_aux=self.training)
 
         if self.supervise_joint_box_scores:
             assert dec_presence_out is not None
@@ -346,16 +336,12 @@ class Sam3Image(torch.nn.Module):
             if self.detach_presence_in_joint_score:
                 prob_dec_presence_out = prob_dec_presence_out.detach()
 
-            outputs_class = inverse_sigmoid(
-                outputs_class.sigmoid() * prob_dec_presence_out.unsqueeze(2)
-            ).clamp(min=-10.0, max=10.0)
+            outputs_class = inverse_sigmoid(outputs_class.sigmoid() * prob_dec_presence_out.unsqueeze(2)).clamp(
+                min=-10.0, max=10.0
+            )
 
-        _update_out(
-            out, "pred_logits", outputs_class[:, :, :num_o2o], update_aux=self.training
-        )
-        _update_out(
-            out, "pred_boxes", outputs_coord[:, :, :num_o2o], update_aux=self.training
-        )
+        _update_out(out, "pred_logits", outputs_class[:, :, :num_o2o], update_aux=self.training)
+        _update_out(out, "pred_boxes", outputs_coord[:, :, :num_o2o], update_aux=self.training)
         _update_out(
             out,
             "pred_boxes_xyxy",
@@ -411,12 +397,8 @@ class Sam3Image(torch.nn.Module):
             for k, v in seg_head_outputs.items():
                 if k in self.segmentation_head.instance_keys:
                     _update_out(out, k, v[:, :num_o2o], auxiliary=aux_masks)
-                    if (
-                        self.o2m_mask_predict and num_o2m > 0
-                    ):  # handle o2m mask prediction
-                        _update_out(
-                            out, f"{k}_o2m", v[:, num_o2o:], auxiliary=aux_masks
-                        )
+                    if self.o2m_mask_predict and num_o2m > 0:  # handle o2m mask prediction
+                        _update_out(out, f"{k}_o2m", v[:, num_o2o:], auxiliary=aux_masks)
                 else:
                     out[k] = v
         else:
@@ -424,14 +406,10 @@ class Sam3Image(torch.nn.Module):
 
     def _get_best_mask(self, out):
         prev_mask_idx = out["pred_logits"].argmax(dim=1).squeeze(1)
-        batch_idx = torch.arange(
-            out["pred_logits"].shape[0], device=prev_mask_idx.device
-        )
+        batch_idx = torch.arange(out["pred_logits"].shape[0], device=prev_mask_idx.device)
         prev_mask_pred = out["pred_masks"][batch_idx, prev_mask_idx][:, None]
         # Downsample mask to match image resolution.
-        prev_mask_pred = self.geometry_encoder.mask_encoder.mask_downsampler(
-            prev_mask_pred
-        )
+        prev_mask_pred = self.geometry_encoder.mask_encoder.mask_downsampler(prev_mask_pred)
         prev_mask_pred = prev_mask_pred.flatten(-2).permute(2, 0, 1)
 
         return prev_mask_pred
@@ -441,17 +419,12 @@ class Sam3Image(torch.nn.Module):
         backbone_out,
         find_input,
         find_target,
-        geometric_prompt: Prompt,
+        prompt,
+        prompt_mask,
     ):
-        with torch.profiler.record_function("SAM3Image._encode_prompt"):
-            prompt, prompt_mask, backbone_out = self._encode_prompt(
-                backbone_out, find_input, geometric_prompt
-            )
         # Run the encoder
         with torch.profiler.record_function("SAM3Image._run_encoder"):
-            backbone_out, encoder_out, _ = self._run_encoder(
-                backbone_out, find_input, prompt, prompt_mask
-            )
+            backbone_out, encoder_out, _ = self._run_encoder(backbone_out, find_input, prompt, prompt_mask)
         out = {
             "encoder_hidden_states": encoder_out["encoder_hidden_states"],
             "prev_encoder_out": {
@@ -502,17 +475,11 @@ class Sam3Image(torch.nn.Module):
             best_mask_idx = out["pred_logits"].argmax(1).squeeze(1)
             batch_idx = torch.arange(len(best_mask_idx), device=best_mask_idx.device)
 
-            out["pred_logits"] = out["pred_logits"][batch_idx, best_mask_idx].unsqueeze(
-                1
-            )
+            out["pred_logits"] = out["pred_logits"][batch_idx, best_mask_idx].unsqueeze(1)
             if "pred_masks" in out:
-                out["pred_masks"] = out["pred_masks"][
-                    batch_idx, best_mask_idx
-                ].unsqueeze(1)
+                out["pred_masks"] = out["pred_masks"][batch_idx, best_mask_idx].unsqueeze(1)
             out["pred_boxes"] = out["pred_boxes"][batch_idx, best_mask_idx].unsqueeze(1)
-            out["pred_boxes_xyxy"] = out["pred_boxes_xyxy"][
-                batch_idx, best_mask_idx
-            ].unsqueeze(1)
+            out["pred_boxes_xyxy"] = out["pred_boxes_xyxy"][batch_idx, best_mask_idx].unsqueeze(1)
 
         return out
 
@@ -534,9 +501,7 @@ class Sam3Image(torch.nn.Module):
         text_outputs = self.backbone.forward_text(input.find_text_batch, device=device)
         backbone_out.update(text_outputs)
 
-        previous_stages_out = SAM3Output(
-            iter_mode=SAM3Output.IterMode.LAST_STEP_PER_STAGE
-        )
+        previous_stages_out = SAM3Output(iter_mode=SAM3Output.IterMode.LAST_STEP_PER_STAGE)
 
         find_input = input.find_inputs[0]
         find_target = input.find_targets[0]
@@ -608,18 +573,12 @@ class Sam3Image(torch.nn.Module):
             vision_feats,
             _,
             _,
-        ) = self.inst_interactive_predictor.model._prepare_backbone_features(
-            backbone_out
-        )
+        ) = self.inst_interactive_predictor.model._prepare_backbone_features(backbone_out)
         # Add no_mem_embed, which is added to the lowest rest feat. map during training on videos
-        vision_feats[-1] = (
-            vision_feats[-1] + self.inst_interactive_predictor.model.no_mem_embed
-        )
+        vision_feats[-1] = vision_feats[-1] + self.inst_interactive_predictor.model.no_mem_embed
         feats = [
             feat.permute(1, 2, 0).view(1, -1, *feat_size)
-            for feat, feat_size in zip(
-                vision_feats[::-1], self.inst_interactive_predictor._bb_feat_sizes[::-1]
-            )
+            for feat, feat_size in zip(vision_feats[::-1], self.inst_interactive_predictor._bb_feat_sizes[::-1])
         ][::-1]
         self.inst_interactive_predictor._features = {
             "image_embed": feats[-1],
@@ -644,26 +603,20 @@ class Sam3Image(torch.nn.Module):
             vision_feats,
             _,
             _,
-        ) = self.inst_interactive_predictor.model._prepare_backbone_features(
-            backbone_out
-        )
+        ) = self.inst_interactive_predictor.model._prepare_backbone_features(backbone_out)
         # Add no_mem_embed, which is added to the lowest res feat. map during training on videos
-        vision_feats[-1] = (
-            vision_feats[-1] + self.inst_interactive_predictor.model.no_mem_embed
-        )
+        vision_feats[-1] = vision_feats[-1] + self.inst_interactive_predictor.model.no_mem_embed
         batch_size = vision_feats[-1].shape[1]
         orig_heights, orig_widths = (
             inference_state["original_heights"],
             inference_state["original_widths"],
         )
-        assert batch_size == len(orig_heights) == len(orig_widths), (
-            f"Batch size mismatch in predict_inst_batch. Got {batch_size}, {len(orig_heights)}, {len(orig_widths)}"
-        )
+        assert (
+            batch_size == len(orig_heights) == len(orig_widths)
+        ), f"Batch size mismatch in predict_inst_batch. Got {batch_size}, {len(orig_heights)}, {len(orig_widths)}"
         feats = [
             feat.permute(1, 2, 0).view(batch_size, -1, *feat_size)
-            for feat, feat_size in zip(
-                vision_feats[::-1], self.inst_interactive_predictor._bb_feat_sizes[::-1]
-            )
+            for feat, feat_size in zip(vision_feats[::-1], self.inst_interactive_predictor._bb_feat_sizes[::-1])
         ][::-1]
         self.inst_interactive_predictor._features = {
             "image_embed": feats[-1],
@@ -682,9 +635,7 @@ class Sam3Image(torch.nn.Module):
 
 
 class Sam3ImageOnVideoMultiGPU(Sam3Image):
-    def __init__(
-        self, *args, async_all_gather=True, gather_backbone_out=None, **kwargs
-    ):
+    def __init__(self, *args, async_all_gather=True, gather_backbone_out=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.rank = int(os.getenv("RANK", "0"))
         self.world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -855,9 +806,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
             frame_idx_to_save = frame_idx_begin + rank
             if frame_idx_to_save >= num_frames:
                 continue
-            frame_buffer = {
-                k: (v[rank], handle) for k, (v, handle) in out_gathered.items()
-            }
+            frame_buffer = {k: (v[rank], handle) for k, (v, handle) in out_gathered.items()}
             if self.gather_backbone_out:
                 # also add gathered SAM 2 backbone features to frame_buffer
                 frame_buffer["tracker_backbone_fpn_0"] = (fpn0[rank], fpn_handle0)
