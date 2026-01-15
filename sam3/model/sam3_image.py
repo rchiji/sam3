@@ -123,7 +123,7 @@ class Sam3Image(torch.nn.Module):
     def _get_img_feats(
         self,
         backbone_out: dict,
-        img_ids: int | torch.Tensor,
+        img_ids: int | torch.Tensor,  # len(img_ids) = batch size
     ) -> tuple[dict[str, torch.Tensor], list[torch.Tensor], list[torch.Tensor], list[tuple[int, int]]]:
         """
         Retrieve correct image features from backbone output.
@@ -209,14 +209,16 @@ class Sam3Image(torch.nn.Module):
             )
         )
         img_feats: list[torch.Tensor]  # [(5184,1,256)]
+        img_pos_embeds: list[torch.Tensor]  # [(5184,1,256)]
+        vis_feat_sizes: list[tuple[int, int]]  # [(72,72)]
         backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
 
         if prev_mask_pred is not None:
             img_feats = [img_feats[-1] + prev_mask_pred]
 
         # Encode geometry
-        geo_feats: torch.Tensor  # (n_box=1,1,256)
-        geo_masks: torch.Tensor  # (n_box=1,1)
+        geo_feats: torch.Tensor  # (n_box,1,256)
+        geo_masks: torch.Tensor  # (n_box,1)
         geo_feats, geo_masks = self.geometry_encoder(
             geo_prompt=geometric_prompt,
             img_feats=img_feats,
@@ -263,11 +265,14 @@ class Sam3Image(torch.nn.Module):
         prompt: torch.Tensor,
         prompt_mask: torch.Tensor,
         encoder_extra_kwargs: dict | None = None,
-    ):
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], tuple]:
         feat_tuple: tuple = self._get_img_feats(
             backbone_out,
             find_input.img_ids,
         )
+        img_feats: list[torch.Tensor]  # [(5184,1,256)]
+        img_pos_embeds: list[torch.Tensor]  # [(5184,1,256)]
+        vis_feat_sizes: list[tuple[int, int]]  # [(72,72)]
         backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
 
         # Run the encoder
@@ -301,17 +306,19 @@ class Sam3Image(torch.nn.Module):
 
     def _run_decoder(
         self,
-        pos_embed,
-        memory,
-        src_mask,
-        out,
-        prompt,
-        prompt_mask,
-        encoder_out,
+        pos_embed: torch.Tensor,  # [5184, 1, 256] encoder_out["pos_embed"],
+        memory: torch.Tensor,  # [5184, 1, 256]　encoder_out["encoder_hidden_states"]
+        src_mask: torch.Tensor,  # encoder_out["padding_mask"]
+        out: dict[str, any],  # インスタンス内で受け継いで結果を格納・更新しているdict
+        prompt: torch.Tensor,  # Ex: (34, 1, 256)
+        prompt_mask: torch.Tensor,  # Ex: (1, 34)
+        encoder_out: dict,
     ):
-        bs = memory.shape[1]
-        query_embed = self.transformer.decoder.query_embed.weight
-        tgt = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        # batch size
+        bs: int = memory.shape[1]
+        # self.transformer.decoder.query_embedはnn.Embedding(200,256)で定義されている
+        query_embed: torch.Tensor = self.transformer.decoder.query_embed.weight  # (200,256)
+        tgt: torch.Tensor = query_embed.unsqueeze(1).repeat(1, bs, 1)  # (200,1,256)
 
         apply_dac = self.transformer.decoder.dac and self.training
         hs, reference_boxes, dec_presence_out, dec_presence_feats = self.transformer.decoder(
@@ -424,21 +431,26 @@ class Sam3Image(torch.nn.Module):
 
     def _run_segmentation_heads(
         self,
-        out,
-        backbone_out,
-        img_ids,
-        vis_feat_sizes,
-        encoder_hidden_states,
-        prompt,
-        prompt_mask,
-        hs,
-    ):
-        apply_dac = self.transformer.decoder.dac and self.training
+        out: dict,
+        backbone_out: dict[str, torch.Tensor],
+        img_ids: torch.Tensor,
+        vis_feat_sizes: list[tuple[int, int]],
+        encoder_hidden_states: torch.Tensor,
+        prompt: torch.Tensor,
+        prompt_mask: torch.Tensor,
+        hs: torch.Tensor,
+    ) -> None:
+        """
+        Transformerの出力を受け取って、セグメンテーションヘッドを実行する。
+        """
+        apply_dac: bool = self.transformer.decoder.dac and self.training
+
+        # UniversalSegmentationHeadを実行
         if self.segmentation_head is not None:
-            num_o2o = (hs.size(2) // 2) if apply_dac else hs.size(2)
-            num_o2m = hs.size(2) - num_o2o
+            num_o2o: int = (hs.size(2) // 2) if apply_dac else hs.size(2)
+            num_o2m: int = hs.size(2) - num_o2o
             obj_queries = hs if self.o2m_mask_predict else hs[:, :, :num_o2o]
-            seg_head_outputs = activation_ckpt_wrapper(self.segmentation_head)(
+            seg_head_outputs: dict[str, torch.Tensor] = activation_ckpt_wrapper(self.segmentation_head)(
                 backbone_feats=backbone_out["backbone_fpn"],
                 obj_queries=obj_queries,
                 image_ids=img_ids,
@@ -447,7 +459,7 @@ class Sam3Image(torch.nn.Module):
                 prompt=prompt,
                 prompt_mask=prompt_mask,
             )
-            aux_masks = False  # self.aux_loss and self.segmentation_head.aux_masks
+            aux_masks: bool = False  # self.aux_loss and self.segmentation_head.aux_masks
             for k, v in seg_head_outputs.items():
                 if k in self.segmentation_head.instance_keys:
                     _update_out(out, k, v[:, :num_o2o], auxiliary=aux_masks)
@@ -470,17 +482,27 @@ class Sam3Image(torch.nn.Module):
 
     def forward_grounding(
         self,
-        backbone_out,
-        find_input,
+        backbone_out: dict[str, torch.Tensor],  # backbone_fpnやvision_pos_encを含む
+        find_input: FindStage,
         find_target,
-        prompt: torch.Tensor,  # <-- Promptではなく、prompt embeddingsそのものを受け取るように変更
-        prompt_mask: torch.Tensor,  # <-- Promptではなく、prompt maskそのものを受け取るように変更
-    ):
+        prompt: torch.Tensor,  # <-- Promptではなく、prompt embeddingsそのものを受け取るように変更 Ex: (34,1,256)
+        prompt_mask: torch.Tensor,  # <-- Promptではなく、prompt maskそのものを受け取るように変更 Ex: (1,34)
+    ) -> dict[str, any]:
+        """
+        transformer encoder -> transformer decoder -> segmentation headsの順にforwardする。
+        """
         # Run the encoder
         with torch.profiler.record_function("SAM3Image._run_encoder"):
-            backbone_out, encoder_out, _ = self._run_encoder(backbone_out, find_input, prompt, prompt_mask)
-        out = {
-            "encoder_hidden_states": encoder_out["encoder_hidden_states"],
+            backbone_out: dict[str, torch.Tensor]
+            encoder_out: dict[str, torch.Tensor]
+            backbone_out, encoder_out, _ = self._run_encoder(
+                backbone_out,
+                find_input,
+                prompt,
+                prompt_mask,
+            )
+        out: dict[str, any] = {
+            "encoder_hidden_states": encoder_out["encoder_hidden_states"],  # [5184,1,256]
             "prev_encoder_out": {
                 "encoder_out": encoder_out,
                 "backbone_out": backbone_out,
@@ -490,12 +512,12 @@ class Sam3Image(torch.nn.Module):
         # Run the decoder
         with torch.profiler.record_function("SAM3Image._run_decoder"):
             out, hs = self._run_decoder(
-                memory=out["encoder_hidden_states"],
-                pos_embed=encoder_out["pos_embed"],
-                src_mask=encoder_out["padding_mask"],
+                memory=out["encoder_hidden_states"],  # [5184, 1, 256]
+                pos_embed=encoder_out["pos_embed"],  # [5184, 1, 256]
+                src_mask=encoder_out["padding_mask"],  # None
                 out=out,
-                prompt=prompt,
-                prompt_mask=prompt_mask,
+                prompt=prompt,  # Ex: (34, 1, 256)
+                prompt_mask=prompt_mask,  # Ex: (1, 34)
                 encoder_out=encoder_out,
             )
 
@@ -506,7 +528,7 @@ class Sam3Image(torch.nn.Module):
                 backbone_out=backbone_out,
                 img_ids=find_input.img_ids,
                 vis_feat_sizes=encoder_out["vis_feat_sizes"],
-                encoder_hidden_states=out["encoder_hidden_states"],
+                encoder_hidden_states=out["encoder_hidden_states"],  # [5184, 1, 256]
                 prompt=prompt,
                 prompt_mask=prompt_mask,
                 hs=hs,

@@ -181,7 +181,7 @@ def _create_transformer_decoder() -> TransformerDecoder:
     decoder = TransformerDecoder(
         layer=decoder_layer,
         num_layers=6,
-        num_queries=200,
+        num_queries=200, # <-- query数 200やん
         return_intermediate=True,
         box_refine=True,
         num_o2m_queries=0,

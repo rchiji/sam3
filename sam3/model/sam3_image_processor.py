@@ -162,7 +162,12 @@ class Sam3Processor:
         label: bool,  # True for foreground, False for background
         state: dict[str, any],
     ):
-        """Adds a box prompt and encodes it without running inference."""
+        """
+        Adds a box prompt and encodes it without running inference.
+
+        Note:
+            self.find_stageがid:0しか持たないので、画像バッチ処理には対応していない。
+        """
         if "backbone_out" not in state:
             raise ValueError("You must call set_image before _add_box_prompt")
 
@@ -238,14 +243,28 @@ class Sam3Processor:
         return self._forward_grounding(state)
 
     @torch.inference_mode()
-    def add_geometric_prompt(self, box: List, label: bool, state: Dict):
+    def add_geometric_prompt(
+        self,
+        box: list,  # [x_center, y_center, width, height] normalized
+        label: bool,  # True for foreground, False for background
+        state: dict[str, any],
+    ):
         """Adds a box prompt and run the inference."""
+
+        # (260114) add_geometric_prompt内で行っていたprompt encodingを別関数化したので、ここでは1行の処理になっている。
         self._add_box_prompt(box, label, state)
         return self._forward_grounding(state)
 
     @torch.inference_mode()
-    def _forward_grounding(self, state: Dict):
-        outputs = self.model.forward_grounding(
+    def _forward_grounding(
+        self,
+        state: dict[str, any],
+    ) -> dict[str, any]:
+        """Runs the grounding heads and updates the state with the results."""
+
+        # Sam3Imageのforward_grounding
+        # （transformer encoder -> transformer decoder -> segmentation headsの順にforward）
+        outputs: dict[str, any] = self.model.forward_grounding(
             backbone_out=state["backbone_out"],
             find_input=self.find_stage,
             prompt=state["prompt"],
