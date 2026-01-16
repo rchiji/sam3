@@ -181,8 +181,12 @@ class Sam3Processor:
             state["geometric_prompt"] = self.model._get_dummy_prompt()
 
         # adding a batch and sequence dimension
-        boxes = torch.tensor(box, device=self.device, dtype=torch.float32).view(1, 1, 4)
-        labels = torch.tensor([label], device=self.device, dtype=torch.bool).view(1, 1)
+        boxes: torch.Tensor = torch.tensor(box, device=self.device, dtype=torch.float32).view(
+            1, 1, 4
+        )  # (1,1,4) なので1 box, 1 batchでしか扱わない想定
+        labels: torch.Tensor = torch.tensor([label], device=self.device, dtype=torch.bool).view(
+            1, 1
+        )  # (1,1) なので1 box, 1 batchでしか扱わない想定
         state["geometric_prompt"].append_boxes(boxes, labels)
 
         # forward_grounding内で行っていたprompt encodingをここで実行するように変更

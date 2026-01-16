@@ -202,6 +202,11 @@ class MLP(nn.Module):
 
 
 def get_clones(module, N):
+    """
+    moduleをN個複製してnn.ModuleListとして返す
+    参考:
+        Transformer layerを複数重ねるときに使う
+    """
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
