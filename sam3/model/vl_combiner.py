@@ -30,7 +30,7 @@ class SAM3VLBackbone(nn.Module):
         compile_visual: bool = False,
         act_ckpt_whole_vision_backbone: bool = False,
         act_ckpt_whole_language_backbone: bool = False,
-        scalp: int = 0,
+        scalp: int = 0,  # 1  <-- scale=0.5の特徴量を廃棄してscale=1以降を使用
     ):
         """Initialize the backbone combiner.
 

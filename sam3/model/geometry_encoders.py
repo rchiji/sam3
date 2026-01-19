@@ -1016,6 +1016,7 @@ class SequenceGeometryEncoder(nn.Module):
                     pos=seq_first_img_pos_embeds,
                     act_ckpt_enable=self.training and self.use_act_ckpt,
                 )
+            # LayerNorm
             final_embeds = self.encode_norm(final_embeds)
 
         ## mask encodeはTransformerエンコードの後に行うみたい

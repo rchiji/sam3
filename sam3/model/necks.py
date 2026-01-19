@@ -100,7 +100,7 @@ class Sam3DualViTDetNeck(nn.Module):
             # Assumes sam2 neck is just a clone of the original neck
             self.sam2_convs = deepcopy(self.convs)
 
-    def forward(self, tensor_list: list[torch.Tensor]) -> tuple[
+    def forward(self, tensor_list: torch.Tensor) -> tuple[
         list[torch.Tensor],
         list[torch.Tensor],
         list[torch.Tensor] | None,

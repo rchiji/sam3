@@ -29,12 +29,31 @@ from .geometry_encoders import Prompt
 from .model_misc import inverse_sigmoid
 
 
-def _update_out(out, out_name, out_value, auxiliary=True, update_aux=True):
+def _update_out(
+    out: dict,
+    out_name: str,
+    out_value: torch.Tensor | List[torch.Tensor],
+    auxiliary: bool = True,
+    update_aux: bool = True,
+):
+    """
+    out dictを更新するユーティリティ関数
+    :param out: 更新対象のdict
+    :param out_name: dict内のキー名
+    :param out_value: 更新する値
+    :param auxiliary: 中間層の出力も保存するかどうか
+        Trueの場合、out_valueがリストであることを想定し、最後の要素をmain出力として保存し、それ以外をaux_outputsとして保存する
+        Falseの場合、out_value全体をmain出力として保存する
+    :param update_aux: auxiliary出力を更新するかどうか
+    """
     out[out_name] = out_value[-1] if auxiliary else out_value
+
+    # 最後の要素以外をaux_outputsに保存する場合
     if auxiliary and update_aux:
-        if "aux_outputs" not in out:
+        if "aux_outputs" not in out:  # aux_outputsが無ければ初期化
             out["aux_outputs"] = [{} for _ in range(len(out_value) - 1)]
         assert len(out["aux_outputs"]) == len(out_value) - 1
+
         for aux_output, aux_value in zip(out["aux_outputs"], out_value[:-1]):
             aux_output[out_name] = aux_value
 
@@ -290,16 +309,18 @@ class Sam3Image(torch.nn.Module):
         )
         encoder_out = {
             # encoded image features
-            "encoder_hidden_states": memory["memory"],
-            "pos_embed": memory["pos_embed"],
+            "encoder_hidden_states": memory["memory"],  # encoderのmain出力
+            "pos_embed": memory["pos_embed"],  # 画像位置埋め込みにlevel位置埋め込みを加算したもの
             "padding_mask": memory["padding_mask"],
             "level_start_index": memory["level_start_index"],
             "spatial_shapes": memory["spatial_shapes"],
             "valid_ratios": memory["valid_ratios"],
             "vis_feat_sizes": vis_feat_sizes,
             # encoded text features (or other prompts)
-            "prompt_before_enc": prompt,
-            "prompt_after_enc": memory.get("memory_text", prompt),
+            "prompt_before_enc": prompt,  # Prompt encoding Ex: (34, 1, 256)
+            "prompt_after_enc": memory.get(
+                "memory_text", prompt
+            ),  # Prompt encoding after Transformer <-- 実際は変化無い
             "prompt_mask": prompt_mask,
         }
         return backbone_out, encoder_out, feat_tuple
@@ -310,38 +331,55 @@ class Sam3Image(torch.nn.Module):
         memory: torch.Tensor,  # [5184, 1, 256]　encoder_out["encoder_hidden_states"]
         src_mask: torch.Tensor,  # encoder_out["padding_mask"]
         out: dict[str, any],  # インスタンス内で受け継いで結果を格納・更新しているdict
-        prompt: torch.Tensor,  # Ex: (34, 1, 256)
+        prompt: torch.Tensor,  # Prompt encoding Ex: (34, 1, 256)
         prompt_mask: torch.Tensor,  # Ex: (1, 34)
         encoder_out: dict,
     ):
         # batch size
         bs: int = memory.shape[1]
+
+        ## 1. decoderのinputの用意
+        # ただ初期値として使うだけで、このquery_embed自体は学習されないし、再利用されない。
         # self.transformer.decoder.query_embedはnn.Embedding(200,256)で定義されている
         query_embed: torch.Tensor = self.transformer.decoder.query_embed.weight  # (200,256)
         tgt: torch.Tensor = query_embed.unsqueeze(1).repeat(1, bs, 1)  # (200,1,256)
 
+        ## 2. decoderの実行
         apply_dac = self.transformer.decoder.dac and self.training
+        hs: torch.Tensor  # TransformerDecoderLayerの各出力をstackしたもの (num_layers,num_queries,bs,d_model)
+        reference_boxes: (
+            torch.Tensor
+        )  # 各TransformerDecoderLayerのreference box参照points (num_layers, num_queries, bs, 4)
+        dec_presence_out: (
+            torch.Tensor | None
+        )  # 各TransformerDecoderLayerのpresence tokenの出力logits (num_layers,bs=1,1)
+        dec_presence_feats: torch.Tensor | None  # 最後のTransformerDecoderLayerのpresence tokenの出力特徴 (bs,1)
+
         hs, reference_boxes, dec_presence_out, dec_presence_feats = self.transformer.decoder(
-            tgt=tgt,
-            memory=memory,
-            memory_key_padding_mask=src_mask,
-            pos=pos_embed,
-            reference_boxes=None,
-            level_start_index=encoder_out["level_start_index"],
-            spatial_shapes=encoder_out["spatial_shapes"],
+            tgt=tgt,  # query_embedのweightsをqueryとして使用
+            memory=memory,  # encoderの出力
+            memory_key_padding_mask=src_mask,  # encoderのpadding mask
+            pos=pos_embed,  # 画像位置埋め込みにlevel埋め込みを加算したもの
+            reference_boxes=None,  # decoder内で初期化される
+            level_start_index=encoder_out["level_start_index"],  # flattenした時の、それぞれのlevelの開始index
+            spatial_shapes=encoder_out["spatial_shapes"],  # 各levelのh,w情報 (bs, num_levels, 2)
             valid_ratios=encoder_out["valid_ratios"],
             tgt_mask=None,
-            memory_text=prompt,
-            text_attention_mask=prompt_mask,
-            apply_dac=apply_dac,
+            memory_text=prompt,  # Prompt encoding Ex: (34, 1, 256)
+            text_attention_mask=prompt_mask,  # Prompt encoding mask Ex: (1, 34)
+            apply_dac=apply_dac,  # training時にDACを有効化するかどうか
         )
-        hs = hs.transpose(1, 2)  # seq-first to batch-first
-        reference_boxes = reference_boxes.transpose(1, 2)  # seq-first to batch-first
+
+        ## 3. decoderの出力をbatch-firstに変換
+        # seq-first to batch-first
+        hs: torch.Tensor = hs.transpose(1, 2)  # (num_layers,bs,num_queries,d_model)
+        reference_boxes: torch.Tensor = reference_boxes.transpose(1, 2)  # (num_layers,bs,num_queries,4)
         if dec_presence_out is not None:
-            # seq-first to batch-first
-            dec_presence_out = dec_presence_out.transpose(1, 2)
+            dec_presence_out = dec_presence_out.transpose(1, 2)  # (num_layers,bs,1) -> (num_layers,1,bs)
 
         out["presence_feats"] = dec_presence_feats
+
+        ## 4. logits値生成、再度box座標予測
         self._update_scores_and_boxes(
             out,
             hs,
@@ -350,48 +388,91 @@ class Sam3Image(torch.nn.Module):
             prompt_mask,
             dec_presence_out=dec_presence_out,
         )
+
         return out, hs
 
     def _update_scores_and_boxes(
         self,
-        out,
-        hs,
-        reference_boxes,
-        prompt,
-        prompt_mask,
-        dec_presence_out=None,
-        is_instance_prompt=False,
+        out: dict,
+        hs: torch.Tensor,  # (num_layers,bs,num_queries,d_model)
+        reference_boxes: torch.Tensor,  # (num_layers,bs,num_queries,4)
+        prompt: torch.Tensor,  # Prompt encoding (num_prompt,bs,d_model) Ex: (34,1,256)
+        prompt_mask: torch.Tensor,  # Prompt encoding mask (bs, num_prompt) Ex: (1,34)
+        dec_presence_out: torch.Tensor | None = None,  # (num_layers,1,bs)
+        is_instance_prompt: bool = False,
     ):
+        """
+        TransformerDecoderLayerの処理をもう一度やってる？
+
+        複数のDecoderLayerの出力hs, reference_boxesを受け取って、最終的なスコアとbox予測を計算する。
+        """
         apply_dac = self.transformer.decoder.dac and self.training
-        num_o2o = (hs.size(2) // 2) if apply_dac else hs.size(2)
-        num_o2m = hs.size(2) - num_o2o
+
+        # dacの場合はquery前半を使用。training時は100個だけ使用し、eval時は200個使用するってことね。
+        num_o2o: int = (hs.size(2) // 2) if apply_dac else hs.size(2)  # 100
+        num_o2m: int = hs.size(2) - num_o2o
         assert num_o2m == (num_o2o if apply_dac else 0)
         out["queries"] = hs[-1][:, :num_o2o]  # remove o2m queries if there are any
-        # score prediction
-        if self.use_dot_prod_scoring:
-            dot_prod_scoring_head = self.dot_prod_scoring
-            if is_instance_prompt and self.instance_dot_prod_scoring is not None:
-                dot_prod_scoring_head = self.instance_dot_prod_scoring
-            outputs_class = dot_prod_scoring_head(hs, prompt, prompt_mask)
-        else:
-            class_embed_head = self.class_embed
-            if is_instance_prompt and self.instance_class_embed is not None:
-                class_embed_head = self.instance_class_embed
-            outputs_class = class_embed_head(hs)
 
-        # box prediction
-        box_head = self.transformer.decoder.bbox_embed
-        if is_instance_prompt and self.transformer.decoder.instance_bbox_embed is not None:
+        ## ---- score prediction ----
+        # TransformerのDecoder層の出力特徴量と、プロンプト特徴量の類似度を計算
+        # dot product scoringでは内部でMLPや線形変換も行うため、単純な内積計算ではない
+
+        if self.use_dot_prod_scoring:  # <-- True
+            dot_prod_scoring_head: DotProductScoring = self.dot_prod_scoring
+            if is_instance_prompt and self.instance_dot_prod_scoring is not None:
+                # instance用のdot prod scorerが定義されている場合はそちらを使用
+                dot_prod_scoring_head = self.instance_dot_prod_scoring
+
+            # TransformerのDecoder層の出力特徴量と、プロンプト特徴量の類似度を計算
+            outputs_class: torch.Tensor = dot_prod_scoring_head(
+                hs,
+                prompt,
+                prompt_mask,
+            )  # (num_layer, bs, num_query, 1)
+        else:
+            # 256次元 -> 1次元への線形変換
+            class_embed_head: torch.nn.Linear = self.class_embed
+            if is_instance_prompt and self.instance_class_embed is not None:
+                # instance用のclass embedが定義されている場合はそちらを使用
+                class_embed_head = self.instance_class_embed
+            outputs_class: torch.Tensor = class_embed_head(hs)  # (num_layers,bs,num_queries,1)
+
+        ## ---- box prediction ----
+        # MLPを使ってboxオフセット値を予測
+
+        # 1. MLPの用意
+        box_head: "MLP" = self.transformer.decoder.bbox_embed
+        if is_instance_prompt and self.transformer.decoder.instance_bbox_embed is not None:  # <-- Falseなので不使用
+            # instance用のbox headが定義されている場合はそちらを使用
             box_head = self.transformer.decoder.instance_bbox_embed
-        anchor_box_offsets = box_head(hs)
-        reference_boxes_inv_sig = inverse_sigmoid(reference_boxes)
-        outputs_coord = (reference_boxes_inv_sig + anchor_box_offsets).sigmoid()
-        outputs_boxes_xyxy = box_cxcywh_to_xyxy(outputs_coord)
+
+        # 2. 参照boxからのオフセット値を予測
+        anchor_box_offsets: torch.Tensor = box_head(hs)  # (num_layers, bs, num_queries, 4)
+
+        # 3. sigmoidの逆変換を使って、reference boxを元の座標系に戻す
+        reference_boxes_inv_sig: torch.Tensor = inverse_sigmoid(reference_boxes)  # (num_layers, bs, num_queries, 4)
+
+        # 4. 2と3の結果を使って、予測boxを計算
+        outputs_coord: torch.Tensor = (
+            reference_boxes_inv_sig + anchor_box_offsets
+        ).sigmoid()  # (num_layers, bs, num_queries, 4)
+
+        # 5. cxcywhをxyxy形式へ変換
+        outputs_boxes_xyxy: torch.Tensor = box_cxcywh_to_xyxy(outputs_coord)  # (num_layers, bs, num_queries, 4)
+
+        ## -- out dictの更新 ---
+        # 最後のlayerの出力をmain outputとして保存し、それ以外をaux_outputsとして保存する
 
         if dec_presence_out is not None:
-            _update_out(out, "presence_logit_dec", dec_presence_out, update_aux=self.training)
+            _update_out(
+                out=out,
+                out_name="presence_logit_dec",
+                out_value=dec_presence_out,  # (1,bs)
+                update_aux=self.training,
+            )
 
-        if self.supervise_joint_box_scores:
+        if self.supervise_joint_box_scores:  # <-- Falseなので不使用
             assert dec_presence_out is not None
             prob_dec_presence_out = dec_presence_out.clone().sigmoid()
             if self.detach_presence_in_joint_score:
@@ -401,31 +482,44 @@ class Sam3Image(torch.nn.Module):
                 min=-10.0, max=10.0
             )
 
-        _update_out(out, "pred_logits", outputs_class[:, :, :num_o2o], update_aux=self.training)
-        _update_out(out, "pred_boxes", outputs_coord[:, :, :num_o2o], update_aux=self.training)
+        # 予測されたスコアをoutに追加
         _update_out(
-            out,
-            "pred_boxes_xyxy",
-            outputs_boxes_xyxy[:, :, :num_o2o],
+            out=out,
+            out_name="pred_logits",
+            out_value=outputs_class[:, :, :num_o2o],  # (bs, num_o2o, 1)
+            update_aux=self.training,
+        )
+        # 予測されたcxcywh boxをoutに追加
+        _update_out(
+            out=out,
+            out_name="pred_boxes",
+            out_value=outputs_coord[:, :, :num_o2o],  # (bs, num_o2o, 4)
+            update_aux=self.training,
+        )
+        # 予測されたxyxy boxをoutに追加
+        _update_out(
+            out=out,
+            out_name="pred_boxes_xyxy",
+            out_value=outputs_boxes_xyxy[:, :, :num_o2o],  # (bs, num_o2o, 4)
             update_aux=self.training,
         )
         if num_o2m > 0 and self.training:
             _update_out(
-                out,
-                "pred_logits_o2m",
-                outputs_class[:, :, num_o2o:],
+                out=out,
+                out_name="pred_logits_o2m",
+                out_value=outputs_class[:, :, num_o2o:],  # (bs, num_o2m, 1)
                 update_aux=self.training,
             )
             _update_out(
-                out,
-                "pred_boxes_o2m",
-                outputs_coord[:, :, num_o2o:],
+                out=out,
+                out_name="pred_boxes_o2m",
+                out_value=outputs_coord[:, :, num_o2o:],  # (bs, num_o2m, 4)
                 update_aux=self.training,
             )
             _update_out(
-                out,
-                "pred_boxes_xyxy_o2m",
-                outputs_boxes_xyxy[:, :, num_o2o:],
+                out=out,
+                out_name="pred_boxes_xyxy_o2m",
+                out_value=outputs_boxes_xyxy[:, :, num_o2o:],  # (bs, num_o2m, 4)
                 update_aux=self.training,
             )
 
@@ -434,37 +528,62 @@ class Sam3Image(torch.nn.Module):
         out: dict,
         backbone_out: dict[str, torch.Tensor],
         img_ids: torch.Tensor,
-        vis_feat_sizes: list[tuple[int, int]],
-        encoder_hidden_states: torch.Tensor,
-        prompt: torch.Tensor,
-        prompt_mask: torch.Tensor,
-        hs: torch.Tensor,
+        vis_feat_sizes: list[tuple[int, int]],  # vis_feat_sizes: list - 可視特徴量のサイズリスト [(72,72)]
+        encoder_hidden_states: torch.Tensor,  # encoder_out["encoder_hidden_states"] (5184,1,256)
+        prompt: torch.Tensor,  # prompt encoding Ex: (34, 1, 256)
+        prompt_mask: torch.Tensor,  # prompt encoding mask Ex: (1, 34)
+        hs: torch.Tensor,  # (num_layers, bs, num_queries, d_model)
     ) -> None:
         """
         Transformerの出力を受け取って、セグメンテーションヘッドを実行する。
+
+        Args:
+            out: dict - 結果を格納するdict
+            backbone_out: dict - backboneの出力
+            img_ids: torch.Tensor - 画像IDのテンソル
+            vis_feat_sizes: list - 可視特徴量のサイズリスト [(72,72)]
+            encoder_hidden_states: torch.Tensor - エンコーダの隠れ状態
+            prompt: torch.Tensor - Prompt encoding Ex: (34, 1, 256)
+            prompt_mask: torch.Tensor - Prompt encoding mask Ex: (1, 34)
+            hs: torch.Tensor - TransformerDecoderLayerの各出力をstackしたもの (num_layers, bs, num_queries, d_model)
         """
+        # 訓練時にDACを適用するかどうか
         apply_dac: bool = self.transformer.decoder.dac and self.training
 
         # UniversalSegmentationHeadを実行
         if self.segmentation_head is not None:
+            # DACが適用されている場合、O2OとO2Mのクエリ数を分割
             num_o2o: int = (hs.size(2) // 2) if apply_dac else hs.size(2)
             num_o2m: int = hs.size(2) - num_o2o
             obj_queries = hs if self.o2m_mask_predict else hs[:, :, :num_o2o]
+
             seg_head_outputs: dict[str, torch.Tensor] = activation_ckpt_wrapper(self.segmentation_head)(
-                backbone_feats=backbone_out["backbone_fpn"],
-                obj_queries=obj_queries,
+                backbone_feats=backbone_out[
+                    "backbone_fpn"
+                ],  # list[torch.Tensor], [[256,288,288][256,144,144][256,72,72]]
+                obj_queries=obj_queries,  # (num_layers, bs, num_queries, d_model) or (num_layers, bs, num_o2o, d_model)
                 image_ids=img_ids,
-                encoder_hidden_states=encoder_hidden_states,
+                encoder_hidden_states=encoder_hidden_states,  # (5184,1,256)
                 act_ckpt_enable=self.training and self.use_act_checkpoint_seg_head,
-                prompt=prompt,
-                prompt_mask=prompt_mask,
+                prompt=prompt,  # prompt encoding Ex: (34, 1, 256)
+                prompt_mask=prompt_mask,  # prompt encoding mask Ex: (1, 34)
             )
             aux_masks: bool = False  # self.aux_loss and self.segmentation_head.aux_masks
             for k, v in seg_head_outputs.items():
                 if k in self.segmentation_head.instance_keys:
-                    _update_out(out, k, v[:, :num_o2o], auxiliary=aux_masks)
+                    _update_out(
+                        out=out,
+                        out_name=k,
+                        out_value=v[:, :num_o2o],
+                        auxiliary=aux_masks,
+                    )
                     if self.o2m_mask_predict and num_o2m > 0:  # handle o2m mask prediction
-                        _update_out(out, f"{k}_o2m", v[:, num_o2o:], auxiliary=aux_masks)
+                        _update_out(
+                            out=out,
+                            out_name=f"{k}_o2m",
+                            out_value=v[:, num_o2o:],
+                            auxiliary=aux_masks,
+                        )
                 else:
                     out[k] = v
         else:
@@ -502,7 +621,9 @@ class Sam3Image(torch.nn.Module):
                 prompt_mask,
             )
         out: dict[str, any] = {
-            "encoder_hidden_states": encoder_out["encoder_hidden_states"],  # [5184,1,256]
+            "encoder_hidden_states": encoder_out[
+                "encoder_hidden_states"
+            ],  # Transformer encoderのmain output [5184,1,256]
             "prev_encoder_out": {
                 "encoder_out": encoder_out,
                 "backbone_out": backbone_out,
@@ -511,11 +632,13 @@ class Sam3Image(torch.nn.Module):
 
         # Run the decoder
         with torch.profiler.record_function("SAM3Image._run_decoder"):
+            out: dict[str, any]
+            hs: torch.Tensor  # Transformer decoderの各layerの出力をstackしたもの (num_layers, bs, num_queries, d_model)
             out, hs = self._run_decoder(
                 memory=out["encoder_hidden_states"],  # [5184, 1, 256]
                 pos_embed=encoder_out["pos_embed"],  # [5184, 1, 256]
                 src_mask=encoder_out["padding_mask"],  # None
-                out=out,
+                out=out,  # 結果の蓄積先のdict
                 prompt=prompt,  # Ex: (34, 1, 256)
                 prompt_mask=prompt_mask,  # Ex: (1, 34)
                 encoder_out=encoder_out,
@@ -568,6 +691,9 @@ class Sam3Image(torch.nn.Module):
         return geometric_prompt
 
     def forward(self, input: BatchedDatapoint):
+        """
+        Interactive modeでのforward??
+        """
         device = self.device
         backbone_out = {"img_batch_all_stages": input.img_batch}
         backbone_out.update(self.backbone.forward_image(input.img_batch))

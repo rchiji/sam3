@@ -131,10 +131,10 @@ def _create_transformer_encoder() -> TransformerEncoderFusion:
         d_model=256,
         dim_feedforward=2048,
         dropout=0.1,
-        pos_enc_at_attn=True,
-        pos_enc_at_cross_attn_keys=False,
-        pos_enc_at_cross_attn_queries=False,
-        pre_norm=True,
+        pos_enc_at_attn=True,  # <-- Self attentionにpos encを加える
+        pos_enc_at_cross_attn_keys=False,  # <-- Cross attentionのkeyにpos encを加えない
+        pos_enc_at_cross_attn_queries=False,  # <-- Cross attentionのqueryにpos encを加えない
+        pre_norm=True,  # <-- Pre-norm architectureを使用
         self_attention=MultiheadAttention(
             num_heads=8,
             dropout=0.1,
@@ -181,7 +181,7 @@ def _create_transformer_decoder() -> TransformerDecoder:
     decoder = TransformerDecoder(
         layer=decoder_layer,
         num_layers=6,
-        num_queries=200, # <-- query数 200やん
+        num_queries=200,  # <-- query数 200やん
         return_intermediate=True,
         box_refine=True,
         num_o2m_queries=0,

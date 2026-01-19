@@ -600,36 +600,36 @@ class ViT(nn.Module):
 
     def __init__(
         self,
-        img_size: int = 1024,
-        patch_size: int = 16,
+        img_size: int = 1024, # 1008
+        patch_size: int = 16, # 14
         in_chans: int = 3,
-        embed_dim: int = 768,
-        depth: int = 12,
-        num_heads: int = 12,
-        mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
+        embed_dim: int = 768, # 1024
+        depth: int = 12, # 32
+        num_heads: int = 12, # 16
+        mlp_ratio: float = 4.0, # 6.425
+        qkv_bias: bool = True, # True
         drop_path_rate: float = 0.0,
-        norm_layer: Union[Callable[..., nn.Module], str] = "LayerNorm",
+        norm_layer: Union[Callable[..., nn.Module], str] = "LayerNorm", # "LayerNorm"
         act_layer: Callable[..., nn.Module] = nn.GELU,
-        use_abs_pos: bool = True,
-        tile_abs_pos: bool = True,
-        rel_pos_blocks: Union[Tuple[int, ...], bool] = (2, 5, 8, 11),
+        use_abs_pos: bool = True, # True
+        tile_abs_pos: bool = True, # True
+        rel_pos_blocks: Union[Tuple[int, ...], bool] = (2, 5, 8, 11), # ()
         rel_pos_zero_init: bool = True,
-        window_size: int = 14,
-        global_att_blocks: Tuple[int, ...] = (2, 5, 8, 11),
-        use_rope: bool = False,
+        window_size: int = 14, # 24
+        global_att_blocks: Tuple[int, ...] = (2, 5, 8, 11), # (7,15,23,31)
+        use_rope: bool = False, # True
         rope_pt_size: Optional[int] = None,
         use_interp_rope: bool = False,
-        pretrain_img_size: int = 224,
-        pretrain_use_cls_token: bool = True,
-        retain_cls_token: bool = True,
+        pretrain_img_size: int = 224, # 336
+        pretrain_use_cls_token: bool = True, # True
+        retain_cls_token: bool = True, # True
         dropout: float = 0.0,
-        return_interm_layers: bool = False,
+        return_interm_layers: bool = False, # False
         init_values: Optional[float] = None,  # for layerscale
         ln_pre: bool = False,
         ln_post: bool = False,
-        bias_patch_embed: bool = True,
-        compile_mode: Optional[str] = None,
+        bias_patch_embed: bool = True, # False
+        compile_mode: Optional[str] = None, # None
         use_act_checkpoint: bool = True,
     ):
         """

@@ -25,28 +25,65 @@ class LinearPresenceHead(nn.Sequential):
 
 
 class MaskPredictor(nn.Module):
-    def __init__(self, hidden_dim, mask_dim):
+    def __init__(
+        self,
+        hidden_dim: int,  # 256
+        mask_dim: int,  # 256
+    ):
         super().__init__()
-        self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
+        self.mask_embed = MLP(
+            input_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+            output_dim=mask_dim,
+            num_layers=3,
+        )
 
     def forward(
         self,
-        obj_queries: torch.Tensor,  # (1,100,256)
+        obj_queries: torch.Tensor,  # (num_layers, bs=1, num_queries=200, d_model=256) or (bs=1, num_queries=200, d_model=256)
         pixel_embed: torch.Tensor,  # (1,256,288,288)
     ):
+        """
+        TransformerDecoderLayerの出力obj_queriesをMLPで変換し、pixel_embedと内積を取ってマスク予測を行う。
+
+        obj_queries:
+            TransformerDecoderLayerの各層の出力 or 最後の層の出力。
+            (num_layers, bs=1, num_queries=200, d_model=256) or
+            (bs=1, num_queries=200, d_model=256)
+        pixel_embed:
+            PixelDecoderの出力特徴マップ。
+            (1,256,288,288)
+        """
         if len(obj_queries.shape) == 3:
+            # TransformerDecoderLayerの最後の層の出力のみが渡された場合
             if pixel_embed.ndim == 3:
                 # batch size was omitted
-                mask_preds = torch.einsum("bqc,chw->bqhw", self.mask_embed(obj_queries), pixel_embed)
+                mask_preds: torch.Tensor = torch.einsum(
+                    "bqc,chw->bqhw",  # 内積計算式
+                    self.mask_embed(obj_queries),  # MLP で変換 (1,200,256)
+                    pixel_embed,  # (1,256,288,288)
+                )  # (1,200,288,288)
             else:
-                mask_preds = torch.einsum("bqc,bchw->bqhw", self.mask_embed(obj_queries), pixel_embed)
+                mask_preds: torch.Tensor = torch.einsum(
+                    "bqc,bchw->bqhw",  # 内積計算式
+                    self.mask_embed(obj_queries),  # MLP で変換 (bs,200,256)
+                    pixel_embed,  # (bs,256,288,288)
+                )  # (bs,200,288,288)
         else:
             # Assumed to have aux masks
             if pixel_embed.ndim == 3:
                 # batch size was omitted
-                mask_preds = torch.einsum("lbqc,chw->lbqhw", self.mask_embed(obj_queries), pixel_embed)
+                mask_preds: torch.Tensor = torch.einsum(
+                    "lbqc,chw->lbqhw",  # 内積計算式
+                    self.mask_embed(obj_queries),  # MLP で変換 (num_layers, 1, num_queries, 256)
+                    pixel_embed,  # (1,256,H,W)
+                )  # (num_layers, 1, num_queries, H, W)
             else:
-                mask_preds = torch.einsum("lbqc,bchw->lbqhw", self.mask_embed(obj_queries), pixel_embed)
+                mask_preds: torch.Tensor = torch.einsum(
+                    "lbqc,bchw->lbqhw",  # 内積計算式
+                    self.mask_embed(obj_queries),  # MLP で変換 (num_layers, bs, num_queries, 256)
+                    pixel_embed,  # (bs,256,H,W)
+                )  # (num_layers, bs, num_queries, H, W)
 
         return mask_preds
 
@@ -54,19 +91,19 @@ class MaskPredictor(nn.Module):
 class SegmentationHead(nn.Module):
     def __init__(
         self,
-        hidden_dim,
-        upsampling_stages,
-        use_encoder_inputs=False,  # <-- encoder hidden statesを使用するかどうか
-        aux_masks=False,
-        no_dec=False,
-        pixel_decoder=None,
-        act_ckpt=False,
-        shared_conv=False,
+        hidden_dim: int,  # 256
+        upsampling_stages: int,  # 3
+        use_encoder_inputs: bool = False,  # <-- encoder hidden statesを使用するかどうか (UniversalSegmentationHeadではTrue)
+        aux_masks: bool = False,  # False
+        no_dec: bool = False,  # False
+        pixel_decoder: PixelDecoder | None = None,
+        act_ckpt: bool = False,  # True
+        shared_conv: bool = False,
         compile_mode_pixel_decoder=None,
     ):
         super().__init__()
-        self.use_encoder_inputs = use_encoder_inputs
-        self.aux_masks = aux_masks
+        self.use_encoder_inputs: bool = use_encoder_inputs
+        self.aux_masks: bool = aux_masks
         if pixel_decoder is not None:
             self.pixel_decoder: nn.Module | PixelDecoder = pixel_decoder
         else:
@@ -76,8 +113,8 @@ class SegmentationHead(nn.Module):
                 shared_conv=shared_conv,
                 compile_mode=compile_mode_pixel_decoder,
             )
-        self.no_dec = no_dec
-        if no_dec:
+        self.no_dec: bool = no_dec
+        if no_dec:  # <-- Trueの場合は単純なConv2dでマスク予測
             self.mask_predictor: nn.Conv2d = nn.Conv2d(
                 hidden_dim,
                 1,
@@ -85,17 +122,21 @@ class SegmentationHead(nn.Module):
                 stride=1,
                 padding=1,
             )
-        else:
-            self.mask_predictor: MaskPredictor = MaskPredictor(hidden_dim, mask_dim=hidden_dim)
+        else:  # <-- Falseの場合はMaskPredictorでマスク予測
+            # MLPでマスク予測
+            self.mask_predictor: MaskPredictor = MaskPredictor(
+                hidden_dim,
+                mask_dim=hidden_dim,
+            )
 
-        self.act_ckpt = act_ckpt
+        self.act_ckpt: bool = act_ckpt
 
         # used to update the output dictionary
-        self.instance_keys = ["pred_masks"]
+        self.instance_keys: list[str] = ["pred_masks"]
 
     @property
     def device(self):
-        self._device = getattr(self, "_device", None) or next(self.parameters()).device
+        self._device: torch.device = getattr(self, "_device", None) or next(self.parameters()).device
         return self._device
 
     def to(self, *args, **kwargs):
@@ -110,7 +151,7 @@ class SegmentationHead(nn.Module):
         encoder_hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """
-        (1,256,288,288)の特徴マップまでDecodeする。
+        (5184,1,256)のencoder hidden statesを(1,256,72,72)の特徴マップまでDecodeする。
 
         backbone_feats: SAM3VLBackbone.forward_image出力 [(1,3,288,288),(1,3,144,144),(1,256,72,72)]
         image_ids: (batch_size,) 各サンプルのbackbone_featsにおけるインデックス
@@ -148,29 +189,34 @@ class SegmentationHead(nn.Module):
             backbone_visual_feats[-1] = encoder_visual_embed
 
             # この特徴マップをアップサンプリングしながら大きい特徴マップと加算 ➔ 畳み込み ➔ GroupNorm ➔ ReLU を行い[1,256,288,288]のpixel_embedを取得する。
+            pixel_embed: torch.Tensor  # (1,256,288,288)
             if self.act_ckpt:
-                pixel_embed = checkpoint.checkpoint(self.pixel_decoder, backbone_visual_feats, use_reentrant=False)
+                pixel_embed: torch.Tensor = checkpoint.checkpoint(
+                    self.pixel_decoder,
+                    backbone_visual_feats,
+                    use_reentrant=False,
+                )
             else:
-                pixel_embed = self.pixel_decoder(backbone_visual_feats)
+                pixel_embed: torch.Tensor = self.pixel_decoder(backbone_visual_feats)
         else:
             backbone_feats = [x.to(model_device) for x in backbone_feats]
-            pixel_embed = self.pixel_decoder(backbone_feats)
+            pixel_embed: torch.Tensor = self.pixel_decoder(backbone_feats)
             if pixel_embed.shape[0] == 1:
                 # For batch_size=1 training, we can avoid the indexing to save memory
-                pixel_embed = pixel_embed.squeeze(0)
+                pixel_embed: torch.Tensor = pixel_embed.squeeze(0)
             else:
-                pixel_embed = pixel_embed[image_ids, ...]
+                pixel_embed: torch.Tensor = pixel_embed[image_ids, ...]
 
         return pixel_embed
 
     def forward(
         self,
         backbone_feats: list[torch.Tensor],
-        obj_queries: torch.Tensor,
-        image_ids,
+        obj_queries: torch.Tensor,  # (num_layers,bs=1,num_queries=200,d_model=256)
+        image_ids: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         if self.use_encoder_inputs:
             assert encoder_hidden_states is not None
 
@@ -181,10 +227,13 @@ class SegmentationHead(nn.Module):
         )
 
         if self.no_dec:
+            # MaskPredictorを使用せず、Conv2dでマスク予測
             mask_pred = self.mask_predictor(pixel_embed)
         elif self.aux_masks:
+            # MaskPredictorでマスク予測（aux_masks=Trueの場合, TransformerDecoderLayerの各層の出力を使用）
             mask_pred = self.mask_predictor(obj_queries, pixel_embed)
         else:
+            # MaskPredictorでマスク予測（aux_masks=Falseの場合、TransformerDecoderLayerの最後の層の出力を使用）
             mask_pred = self.mask_predictor(obj_queries[-1], pixel_embed)
 
         return {"pred_masks": mask_pred}
@@ -282,8 +331,36 @@ class UniversalSegmentationHead(SegmentationHead):
         act_ckpt: bool = False,  # True
         presence_head: bool = False,  # False
         dot_product_scorer=None,  # None
-        cross_attend_prompt: "MultiheadAttention" | None = None,
+        cross_attend_prompt: "MultiheadAttention" | None = None,  # not None
     ):
+        """
+        model_builder.pyでの呼び出し例:
+            def _create_segmentation_head(compile_mode=None) -> UniversalSegmentationHead:
+                pixel_decoder = PixelDecoder(
+                    num_upsampling_stages=3,
+                    interpolation_mode="nearest",
+                    hidden_dim=256,
+                    compile_mode=compile_mode,
+                )
+
+                cross_attend_prompt = MultiheadAttention(
+                    num_heads=8,
+                    dropout=0,
+                    embed_dim=256,
+                )
+
+                segmentation_head = UniversalSegmentationHead(
+                    hidden_dim=256,
+                    upsampling_stages=3,
+                    aux_masks=False,
+                    presence_head=False,
+                    dot_product_scorer=None,
+                    act_ckpt=True,
+                    cross_attend_prompt=cross_attend_prompt,
+                    pixel_decoder=pixel_decoder,
+                )
+                return segmentation_head
+        """
         super().__init__(
             hidden_dim=hidden_dim,
             upsampling_stages=upsampling_stages,
@@ -304,8 +381,9 @@ class UniversalSegmentationHead(SegmentationHead):
                 dot_product_scorer if dot_product_scorer is not None else LinearPresenceHead(self.d_model)
             )
 
-        self.cross_attend_prompt = cross_attend_prompt
-        if self.cross_attend_prompt is not None:
+        self.cross_attend_prompt: "MultiheadAttention" = cross_attend_prompt
+        if self.cross_attend_prompt is not None:  # <-- True
+            # LayerNorm for cross attention
             self.cross_attn_norm = nn.LayerNorm(self.d_model)
 
         # Semantic segmentation head
@@ -324,28 +402,60 @@ class UniversalSegmentationHead(SegmentationHead):
     def forward(
         self,
         backbone_feats: list[torch.Tensor],
-        obj_queries: torch.Tensor,  # (1,100,256)
+        obj_queries: torch.Tensor,  # (num_layers,bs=1,num_queries=200,d_model=256)
         image_ids: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor] = None,  # (5184,1,256)
         prompt: Optional[torch.Tensor] = None,
         prompt_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> dict[str, torch.Tensor | None]:
+        """
+
+        Args:
+            backbone_feats: List of image feature maps from the backbone, ordered from highest to lowest resolution.
+                [[1,256,288,288], [1,256,144,144], [1,256,72,72]]
+
+            obj_queries: Object queries from the transformer decoder.
+                (num_layers, bs=1, num_queries=200, d_model=256)
+
+            image_ids: Tensor of image IDs for indexing into backbone features. (bs,)
+
+            encoder_hidden_states: Encoder hidden states from the transformer encoder.
+                (spatial_dim*spatial_dim, bs=1, d_model=256) = (5184,1,256)
+
+            prompt: Prompt encoding. (prompt_length, bs=1, d_model=256)
+                Ex: (34, 1, 256)
+            prompt_mask: Prompt encoding mask. (bs=1, prompt_length)
+                Ex: (1, 34)
+
+        Returns:
+            dict: A dictionary containing:
+                - "pred_masks": Predicted instance masks. (bs=1, num_queries=200, H, W)
+                - "semantic_seg": Predicted semantic segmentation map. (bs=1, 1, H, W)
+                - "presence_logit": Presence logits for each object query. (bs=1, num_queries=200) or None
+        """
+
         assert encoder_hidden_states is not None
         # batch size
         bs: int = encoder_hidden_states.shape[1]
 
-        # (Option) encoder_hidden_statesにpromptの情報をクロスアテンションで融合
+        ## 1. encoder_hidden_statesとprompt encodingをCross attention
         if self.cross_attend_prompt is not None:
-            tgt2 = self.cross_attn_norm(encoder_hidden_states)
-            tgt2 = self.cross_attend_prompt(
+            # 1.1 LayerNorm
+            tgt2: torch.Tensor = self.cross_attn_norm(encoder_hidden_states)
+            # 1.2 Cross Attention
+            tgt2: tuple[torch.Tensor, torch.Tensor] = self.cross_attend_prompt(
                 query=tgt2,
                 key=prompt,
                 value=prompt,
                 key_padding_mask=prompt_mask,
-            )[0]
+            )[
+                0
+            ]  # <-- 返り値がタプルなので[0]で取り出す
+            # 1.3 Residual connection
             encoder_hidden_states = tgt2 + encoder_hidden_states
 
+        ## 2. Presence headで各object queryの存在確率を予測
         presence_logit = None
         if self.presence_head is not None:  # <-- 不使用っぽい
             pooled_enc = encoder_hidden_states.mean(0)
@@ -359,6 +469,7 @@ class UniversalSegmentationHead(SegmentationHead):
                 .squeeze(1)
             )
 
+        ## 3. PixelDecoderでpixel levelのembedを取得
         # 親クラスの_pixel_embedを呼び出し。この中でPixelDecoderが呼び出される。
         pixel_embed: torch.Tensor = self._embed_pixels(
             backbone_feats=backbone_feats,
@@ -366,20 +477,37 @@ class UniversalSegmentationHead(SegmentationHead):
             encoder_hidden_states=encoder_hidden_states,
         )  # (1,256,288,288)
 
-        # インスタンスレベルの特徴マップを取得
+        ## 4. インスタンスレベルの特徴マップを取得
+        # 4.1 pixel_embedを1x1 Conv
         instance_embeds: torch.Tensor = self.instance_seg_head(pixel_embed)  # (1,256,288,288)
 
-        if self.no_dec:
+        ## 4.2 MaskPredictorでの処理 （aux_masks=True/Falseの場合）
+        # MLP(TransformerDecoderLayerの出力obj_queries)とinstance_embedsを内積計算でスコア化
+        if self.no_dec:  # <-- 多分使われてない
+            # MaskPredictorを使用せず、Conv2dでの処理
             mask_pred: torch.Tensor = self.mask_predictor(instance_embeds)
         elif self.aux_masks:
-            mask_pred: torch.Tensor = self.mask_predictor(obj_queries, instance_embeds)
-        else:  # <-- 多分これが使われてる。MaskPredictorでの処理
+            # MaskPredictorでの処理（aux_masks=Trueの場合、TransformerDecoderLayerの各層の出力を使用）
             mask_pred: torch.Tensor = self.mask_predictor(
-                obj_queries[-1],
+                obj_queries,
                 instance_embeds,
-            )
+            )  # (num_layers,1,200,288,288)
+        else:  # <-- 多分これが使われてる。MaskPredictorでの処理
+            # MaskPredictorでの処理（aux_masks=Falseの場合、TransformerDecoderLayerの最後の層の出力を使用）
+            mask_pred: torch.Tensor = self.mask_predictor(
+                obj_queries[-1],  # 最後のlayerの出力を使用 (1,200,256)
+                instance_embeds,
+            )  # (1,200,288,288)
+
+        ## 5. Semantic segmentation headでsemantic segmentationを予測
+        # pixel_embedを1x1 Convで1チャンネルに変換 fgかbgかのバイナリ分類
+        semantic_seg: torch.Tensor = self.semantic_seg_head(pixel_embed)  # (1,1,288,288)
+
+        ## 6. 出力辞書を返す
         return {
             "pred_masks": mask_pred,  # (1,num_queries,288,288)
-            "semantic_seg": self.semantic_seg_head(pixel_embed),  # 256 -> 1
+            "semantic_seg": semantic_seg,  # 256 -> 1
             "presence_logit": presence_logit,  # None
+            # (260119) pixel_embedもstateに保存しておく
+            "pixel_embed": pixel_embed,  # (1,256,288,288)
         }

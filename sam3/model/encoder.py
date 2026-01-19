@@ -28,15 +28,15 @@ class TransformerEncoderLayer(nn.Module):
 
     def __init__(
         self,
-        activation: str,
+        activation: str,  # "relu"
         cross_attention: nn.Module | "MultiheadAttention",
-        d_model: int,
-        dim_feedforward: int,
-        dropout: float,
-        pos_enc_at_attn: bool,
-        pos_enc_at_cross_attn_keys: bool,
-        pos_enc_at_cross_attn_queries: bool,
-        pre_norm: bool,
+        d_model: int,  # 256
+        dim_feedforward: int,  # 2048
+        dropout: float,  # 0.1
+        pos_enc_at_attn: bool,  # True
+        pos_enc_at_cross_attn_keys: bool,  # False
+        pos_enc_at_cross_attn_queries: bool,  # False
+        pre_norm: bool,  # True
         self_attention: nn.Module | "MultiheadAttention",
     ):
         """
@@ -55,33 +55,33 @@ class TransformerEncoderLayer(nn.Module):
             self_attention: Self-attention module
         """
         super().__init__()
-        self.d_model = d_model
-        self.dim_feedforward = dim_feedforward
-        self.dropout_value = dropout
-        self.self_attn = self_attention
-        self.cross_attn_image = cross_attention
+        self.d_model: int = d_model
+        self.dim_feedforward: int = dim_feedforward
+        self.dropout_value: float = dropout
+        self.self_attn: nn.Module | "MultiheadAttention" = self_attention
+        self.cross_attn_image: nn.Module | "MultiheadAttention" = cross_attention
 
         # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.linear1: nn.Linear = nn.Linear(d_model, dim_feedforward)
+        self.dropout: nn.Dropout = nn.Dropout(dropout)
+        self.linear2: nn.Linear = nn.Linear(dim_feedforward, d_model)
 
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
+        self.norm1: nn.LayerNorm = nn.LayerNorm(d_model)
+        self.norm2: nn.LayerNorm = nn.LayerNorm(d_model)
+        self.norm3: nn.LayerNorm = nn.LayerNorm(d_model)
+        self.dropout1: nn.Dropout = nn.Dropout(dropout)
+        self.dropout2: nn.Dropout = nn.Dropout(dropout)
+        self.dropout3: nn.Dropout = nn.Dropout(dropout)
 
-        self.activation_str = activation
-        self.activation = get_activation_fn(activation)
-        self.pre_norm = pre_norm
+        self.activation_str: str = activation
+        # F.relu | F.gelu | F.glu
+        self.activation: callable = get_activation_fn(activation)
+        self.pre_norm: bool = pre_norm
 
-        self.pos_enc_at_attn = pos_enc_at_attn
-        self.pos_enc_at_cross_attn_queries = pos_enc_at_cross_attn_queries
-        self.pos_enc_at_cross_attn_keys = pos_enc_at_cross_attn_keys
-
-        self.layer_idx = None
+        self.pos_enc_at_attn: bool = pos_enc_at_attn
+        self.pos_enc_at_cross_attn_queries: bool = pos_enc_at_cross_attn_queries
+        self.pos_enc_at_cross_attn_keys: bool = pos_enc_at_cross_attn_keys
+        self.layer_idx: int | None = None
 
     def forward_post(
         self,
@@ -140,15 +140,15 @@ class TransformerEncoderLayer(nn.Module):
 
     def forward_pre(
         self,
-        tgt: Tensor,
-        memory: Tensor,
-        dac: bool = False,
-        tgt_mask: Optional[Tensor] = None,
-        memory_mask: Optional[Tensor] = None,
-        tgt_key_padding_mask: Optional[Tensor] = None,
-        memory_key_padding_mask: Optional[Tensor] = None,
-        pos: Optional[Tensor] = None,
-        query_pos: Optional[Tensor] = None,
+        tgt: Tensor,  # [1,5184,256]
+        memory: Tensor,  # Prompt encoding Ex: (34,1,256)
+        dac: bool = False,  # 多分Falseで固定
+        tgt_mask: Tensor | None = None,
+        memory_mask: Tensor | None = None,
+        tgt_key_padding_mask: Tensor | None = None,
+        memory_key_padding_mask: Tensor | None = None,
+        pos: Tensor | None = None,
+        query_pos: Tensor | None = None,
         # attn_bias: Optional[Tensor] = None,
         # **kwargs,
     ) -> Tensor:
@@ -166,7 +166,9 @@ class TransformerEncoderLayer(nn.Module):
             tgt_key_padding_mask: Key padding mask for self-attention
             memory_key_padding_mask: Key padding mask for cross-attention
             pos: Positional encoding for memory
+                画像位置埋め込み。cross-attentionでPrompt encodingに加算するために使用。（不使用）
             query_pos: Positional encoding for query
+                画像位置埋め込みにlevel埋め込みを加算したもの。self-attentionで使用
             attn_bias: Optional attention bias tensor
             **kwargs: Additional keyword arguments
 
@@ -178,26 +180,46 @@ class TransformerEncoderLayer(nn.Module):
             assert tgt.shape[0] % 2 == 0
             other_tgt = tgt[tgt.shape[0] // 2 :]
             tgt = tgt[: tgt.shape[0] // 2]
-        tgt2 = self.norm1(tgt)
+
+        # LayerNorm
+        tgt2: torch.Tensor = self.norm1(tgt)
+        # query, keyの用意 for self-attention。オプションで位置埋め込みを加算
         q = k = tgt2 + query_pos if self.pos_enc_at_attn else tgt2
-        tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask)[0]
-        tgt = tgt + self.dropout1(tgt2)
+        # MHA
+        tgt2: torch.Tensor = self.self_attn(
+            q,
+            k,
+            value=tgt2,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+        )[
+            0
+        ]  # (1,5184,256)
+        # MHAした結果をResidual connection
+        tgt: torch.Tensor = tgt + self.dropout1(tgt2)
+
         if dac:
             # Recombine
-            tgt = torch.cat((tgt, other_tgt), dim=0)
-        tgt2 = self.norm2(tgt)
-        tgt2 = self.cross_attn_image(
-            query=tgt2 + query_pos if self.pos_enc_at_cross_attn_queries else tgt2,
-            key=memory + pos if self.pos_enc_at_cross_attn_keys else memory,
-            value=memory,
+            tgt: torch.Tensor = torch.cat((tgt, other_tgt), dim=0)
+
+        # LayerNorm
+        tgt2: torch.Tensor = self.norm2(tgt)
+        ## Cross attention to promt encoding
+        # keyとvalueにPrompt encodingを使う。MHAの構造はself-attentionと同じ。
+        tgt2: torch.Tensor = self.cross_attn_image(
+            query=tgt2 + query_pos if self.pos_enc_at_cross_attn_queries else tgt2,  # オプションで位置埋め込みを加算
+            key=memory + pos if self.pos_enc_at_cross_attn_keys else memory,  # オプションで位置埋め込みを加算
+            value=memory,  # Prompt encoding Ex: (34,1,256)
             attn_mask=memory_mask,
             key_padding_mask=memory_key_padding_mask,
             # attn_bias=attn_bias,
-        )[0]
-        tgt = tgt + self.dropout2(tgt2)
-        tgt2 = self.norm3(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
-        tgt = tgt + self.dropout3(tgt2)
+        )[
+            0
+        ]  # (1,5184,256)
+        tgt: torch.Tensor = tgt + self.dropout2(tgt2)
+        tgt2: torch.Tensor = self.norm3(tgt)
+        tgt2: torch.Tensor = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
+        tgt: torch.Tensor = tgt + self.dropout3(tgt2)
         return tgt
 
     def forward(
@@ -233,7 +255,7 @@ class TransformerEncoderLayer(nn.Module):
         Returns:
             Processed tensor after self-attention, cross-attention, and feedforward network
         """
-        fwd_fn = self.forward_pre if self.pre_norm else self.forward_post
+        fwd_fn: callable = self.forward_pre if self.pre_norm else self.forward_post
         return fwd_fn(
             tgt,
             memory,
@@ -253,10 +275,7 @@ class TransformerEncoder(nn.Module):
     """
     Transformer encoder that processes multi-level features.
 
-    This encoder takes multi-level features (e.g., from a backbone network) and processes
-    them through a stack of transformer encoder layers. It supports features from multiple
-    levels (e.g., different resolutions) and can apply activation checkpointing for memory
-    efficiency during training.
+    This encoder takes multi-level features (e.g., from a backbone network) and processes them through a stack of transformer encoder layers. It supports features from multiple levels (e.g., different resolutions) and can apply activation checkpointing for memory    efficiency during training.
 
     Args:
         layer: The encoder layer to be stacked multiple times
@@ -283,7 +302,7 @@ class TransformerEncoder(nn.Module):
         self.num_feature_levels = num_feature_levels
         self.level_embed = None
         if num_feature_levels > 1:
-            self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
+            self.level_embed: nn.Parameter = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
 
         if frozen:
             for p in self.parameters():
@@ -298,18 +317,30 @@ class TransformerEncoder(nn.Module):
             layer.layer_idx = layer_idx
 
     @staticmethod
-    def get_reference_points(spatial_shapes, valid_ratios, device):
+    def get_reference_points(
+        spatial_shapes,
+        valid_ratios,  # maskの有効な部分の比率 (bs, num_levels, 2)
+        device,
+    ):
+        """
+        72*72の特徴量マップに対して、参照点を計算する。
+        """
         with torch.no_grad():
             reference_points_list = []
             for lvl, (H_, W_) in enumerate(spatial_shapes):
+                ref_y: torch.Tensor  # [H_, W_]
+                ref_x: torch.Tensor  # [H_, W_]
                 ref_y, ref_x = torch.meshgrid(
                     torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
                     torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device),
                 )
+                # [H_,W_] -> [1,H_*W_]
                 ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * H_)
                 ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * W_)
+                # [1,H_*W_,2]
                 ref = torch.stack((ref_x, ref_y), -1)
                 reference_points_list.append(ref)
+            # [1,\sum{hxw},2]
             reference_points = torch.cat(reference_points_list, 1)
             reference_points = reference_points[:, :, None] * valid_ratios[:, None]
 
@@ -317,52 +348,62 @@ class TransformerEncoder(nn.Module):
 
     def _prepare_multilevel_features(
         self,
-        srcs,
-        masks,
-        pos_embeds,
+        srcs: list[torch.Tensor],  # image feature [(5184,1,256)]
+        masks: list[torch.Tensor] | None,
+        pos_embeds: list[torch.Tensor] | None,  # image位置埋め込み [(5184,1,256)]
     ):
         """
         Prepare multi-level features for transformer encoder.
 
+        image_featureをflattenして連結し、レベルごとの位置埋め込みを加算する。
+        ※ image featureは1 levelしか使ってないから、flattenして連結する意味はあまりなさそう。
         """
         assert len(srcs) == self.num_feature_levels, "mismatch between expected and received # of feature levels"
 
-        src_flatten = []
-        mask_flatten = []
-        lvl_pos_embed_flatten = []
-        spatial_shapes = []
-        has_mask = masks is not None and masks[0] is not None
+        src_flatten: list[torch.Tensor] = []
+        mask_flatten: list[torch.Tensor] = []
+        lvl_pos_embed_flatten: list[torch.Tensor] = []
+        spatial_shapes: list[tuple[int, int]] = []
+        has_mask: bool = masks is not None and masks[0] is not None
         for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
             bs, c, h, w = src.shape
-            spatial_shape = (h, w)
+            spatial_shape: tuple[int, int] = (h, w)
             spatial_shapes.append(spatial_shape)
 
-            src = src.flatten(2).transpose(1, 2)  # bs, hw, c
+            # [5184, 1, 256] -> [1, 5184, 256]
+            src: torch.Tensor = src.flatten(2).transpose(1, 2)  # bs, hw, c
             if has_mask:
-                mask = mask.flatten(1)
-            pos_embed = pos_embed.flatten(2).transpose(1, 2)  # bs, hw, c
+                mask: torch.Tensor = mask.flatten(1)
+            # [5184, 1, 256] -> [1, 5184, 256]
+            pos_embed: torch.Tensor = pos_embed.flatten(2).transpose(1, 2)  # bs, hw, c
+
             if self.level_embed is not None:
-                lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+                # 位置埋め込みにレベル埋め込みを加算
+                lvl_pos_embed: torch.Tensor = pos_embed + self.level_embed[lvl].view(1, 1, -1)
             else:
-                lvl_pos_embed = pos_embed
+                lvl_pos_embed: torch.Tensor = pos_embed
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             if has_mask:
                 mask_flatten.append(mask)
-        src_flatten = torch.cat(src_flatten, 1)  # bs, \sum{hxw}, c
-        mask_flatten = torch.cat(mask_flatten, 1) if has_mask else None  # bs, \sum{hxw}
-        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)  # bs, \sum{hxw}, c
-        spatial_shapes = torch.tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
-        level_start_index = torch.cat(
+
+        # 複数のimage featureをflattenにしたものを連結
+        # [1, 5184, 256] x num_feature_levels -> [1, \sum{hxw}, 256]
+        src_flatten: torch.Tensor = torch.cat(src_flatten, 1)  # bs, \sum{hxw}, c
+        mask_flatten: torch.Tensor | None = torch.cat(mask_flatten, 1) if has_mask else None  # bs, \sum{hxw}
+        lvl_pos_embed_flatten: torch.Tensor = torch.cat(lvl_pos_embed_flatten, 1)  # bs, \sum{hxw}, c
+        spatial_shapes: torch.Tensor = torch.tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
+        # flattenした時の、それぞれのlevelの開始index
+        level_start_index: torch.Tensor = torch.cat(
             (
-                spatial_shapes.new_zeros((1,)),
-                spatial_shapes.prod(1).cumsum(0)[:-1],
+                spatial_shapes.new_zeros((1,)),  # 先頭は0
+                spatial_shapes.prod(1).cumsum(0)[:-1],  # 各levelのh*wを累積和で計算して、最後の要素を除く
             )
-        )
+        )  # (num_levels,)
         if has_mask:
-            valid_ratios = torch.stack([get_valid_ratio(m) for m in masks], 1)
+            valid_ratios: torch.Tensor = torch.stack([get_valid_ratio(m) for m in masks], 1)
         else:
-            valid_ratios = torch.ones(
+            valid_ratios: torch.Tensor = torch.ones(
                 (src_flatten.shape[0], self.num_feature_levels, 2),
                 device=src_flatten.device,
             )
@@ -378,11 +419,11 @@ class TransformerEncoder(nn.Module):
 
     def forward(
         self,
-        src: list[Tensor],  # [(5184,1,256)]
+        src: list[Tensor],  # image feature [(5184,1,256)]
         src_key_padding_masks: list[Tensor] | None = None,
-        pos: list[Tensor] | None = None,  # 位置埋め込み [(5184,1,256)]
+        pos: list[Tensor] | None = None,  # image位置埋め込み [(5184,1,256)]
         prompt: Tensor | None = None,  # Ex: (34,1,256)
-        prompt_key_padding_mask: Tensor | None = None,  # Ex: (1,34)
+        prompt_key_padding_mask: Tensor | None = None,  # None
         encoder_extra_kwargs: dict | None = None,
     ) -> Tuple[Tensor, Tensor | None, Tensor, Tensor, Tensor, Tensor]:
         """
@@ -410,40 +451,56 @@ class TransformerEncoder(nn.Module):
             assert len(src_key_padding_masks) == self.num_feature_levels
         if pos is not None:
             assert len(pos) == self.num_feature_levels
+
+        # 複数のimage featureをflattenして連結し、レベルごとの位置埋め込みを加算 ※ image featureは1 levelしか使ってないから、flattenして連結する意味はあまりなさそう。軸順調整のためにはいるけど
         # Flatten multilevel feats and add level pos embeds
+        src_flatten: Tensor  # [1,5184,256] ※ num_feature_levels=1 の場合 もし2以上なら[1,\sum{hxw},256]
         (
-            src_flatten,
+            src_flatten,  # Flattened image feature
             key_padding_masks_flatten,
-            lvl_pos_embed_flatten,
+            lvl_pos_embed_flatten,  # 画像位置埋め込みにレベル埋め込みを加算したもの。self-attentionで使用
             level_start_index,
-            valid_ratios,
+            valid_ratios,  # maskの有効な部分の比率 (bs, num_levels, 2)
+            spatial_shapes,  # 特徴量マップの空間形状 [(72,72),(h2,w2),...]
+        ) = self._prepare_multilevel_features(
+            src,
+            src_key_padding_masks,
+            pos,
+        )
+
+        # 参照点を計算 (使ってない?)
+        reference_points: Tensor = self.get_reference_points(
             spatial_shapes,
-        ) = self._prepare_multilevel_features(src, src_key_padding_masks, pos)
+            valid_ratios,
+            device=src_flatten.device,
+        )
 
-        reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src_flatten.device)
-
-        output = src_flatten
+        ## ---- Transformer Encoder layers ----
+        output: torch.Tensor = src_flatten
+        # layerを順番に適用 outputは更新されるけど、Cross attentionのmemoryは変わらずpromptのまま
         for layer in self.layers:
             layer_kwargs = {}
 
             assert isinstance(layer, TransformerEncoderLayer)
-            layer_kwargs["memory"] = prompt
+            layer_kwargs["memory"] = prompt  # Ex: (34,1,256) promptがCross attentionのmemoryになる
             layer_kwargs["memory_key_padding_mask"] = prompt_key_padding_mask
             layer_kwargs["query_pos"] = lvl_pos_embed_flatten
-            layer_kwargs["tgt"] = output
+            layer_kwargs["tgt"] = output  # [1,5184,256] main input to the layer
             layer_kwargs["tgt_key_padding_mask"] = key_padding_masks_flatten
 
             if self.training:
                 assert self.use_act_checkpoint, "activation ckpt not enabled in encoder"
             if encoder_extra_kwargs is not None:
                 layer_kwargs.update(encoder_extra_kwargs)
-            output = activation_ckpt_wrapper(layer)(
+
+            # TransformerEncoderLayerのforwardを呼び出す
+            output: torch.Tensor = activation_ckpt_wrapper(layer)(
                 **layer_kwargs,
                 act_ckpt_enable=self.training and self.use_act_checkpoint,
             )
         # return as seq first
         return (
-            output.transpose(0, 1),
+            output.transpose(0, 1),  # [5184,1,256]
             (key_padding_masks_flatten.transpose(0, 1) if key_padding_masks_flatten is not None else None),
             lvl_pos_embed_flatten.transpose(0, 1),
             level_start_index,
@@ -465,7 +522,7 @@ class TransformerEncoderFusion(TransformerEncoder):
         num_layers: Number of encoder layers to stack
         d_model: Model dimension/hidden size
         num_feature_levels: Number of feature levels to process
-        add_pooled_text_to_img_feat: Whether to add pooled text features to image features
+        add_pooled_text_to_img_feat: bool = True,  # False
         pool_text_with_mask: Whether to use the mask when pooling text features
         compile_mode: Mode for torch.compile, or None to disable compilation
         **kwargs: Additional arguments to pass to the parent class
@@ -478,7 +535,7 @@ class TransformerEncoderFusion(TransformerEncoder):
         d_model: int,  # 256
         num_feature_levels: int,  # 1
         add_pooled_text_to_img_feat: bool = True,  # False
-        pool_text_with_mask: bool = False,  # True
+        pool_text_with_mask: bool = False,  # True <-- add_pooled_text_to_img_featがTrueのときのみ意味がある
         compile_mode: Optional[str] = None,
         **kwargs,
     ):
@@ -489,10 +546,10 @@ class TransformerEncoderFusion(TransformerEncoder):
             num_feature_levels,
             **kwargs,
         )
-        self.add_pooled_text_to_img_feat = add_pooled_text_to_img_feat
+        self.add_pooled_text_to_img_feat: bool = add_pooled_text_to_img_feat
         if self.add_pooled_text_to_img_feat:
-            self.text_pooling_proj = nn.Linear(d_model, d_model)
-        self.pool_text_with_mask = pool_text_with_mask
+            self.text_pooling_proj: nn.Linear = nn.Linear(d_model, d_model)
+        self.pool_text_with_mask: bool = pool_text_with_mask
         if compile_mode is not None:
             self.forward = torch.compile(self.forward, mode=compile_mode, fullgraph=True)
 
@@ -509,7 +566,7 @@ class TransformerEncoderFusion(TransformerEncoder):
         src_pos: list[Tensor] | None = None,  # 位置埋め込み [(5184,1,256)]
         prompt_key_padding_mask: Tensor | None = None,
         prompt_pos: Tensor | None = None,  # Not used here
-        feat_sizes: list[tuple[int, int]] | None = None,
+        feat_sizes: list[tuple[int, int]] | None = None,  # [(72,72)]
         encoder_extra_kwargs: dict | None = None,
     ):
         # Restore spatial shapes of vision
@@ -519,9 +576,10 @@ class TransformerEncoderFusion(TransformerEncoder):
             assert len(feat_sizes) == len(src)
             if src_key_padding_mask is None:
                 src_key_padding_mask = [None] * len(src)
+
             for i, (h, w) in enumerate(feat_sizes):
-                src[i] = src[i].reshape(h, w, bs, -1).permute(2, 3, 0, 1)
-                src_pos[i] = src_pos[i].reshape(h, w, bs, -1).permute(2, 3, 0, 1)
+                src[i] = src[i].reshape(h, w, bs, -1).permute(2, 3, 0, 1)  # (5184,1,256) -> (72,72,1,256)
+                src_pos[i] = src_pos[i].reshape(h, w, bs, -1).permute(2, 3, 0, 1)  # (5184,1,256) -> (72,72,1,256)
                 src_key_padding_mask[i] = (
                     src_key_padding_mask[i].reshape(h, w, bs).permute(2, 0, 1)
                     if src_key_padding_mask[i] is not None
@@ -532,7 +590,11 @@ class TransformerEncoderFusion(TransformerEncoder):
 
         if self.add_pooled_text_to_img_feat:
             # Fusion: Add mean pooled text to image features
-            pooled_text = pool_text_feat(prompt, prompt_key_padding_mask, self.pool_text_with_mask)
+            pooled_text: Tensor = pool_text_feat(
+                prompt,
+                prompt_key_padding_mask,
+                self.pool_text_with_mask,
+            )
             pooled_text = self.text_pooling_proj(pooled_text)[..., None, None]  # prompt is seq first
             src = [x.add_(pooled_text) for x in src]
 
@@ -544,10 +606,10 @@ class TransformerEncoderFusion(TransformerEncoder):
             spatial_shapes,
             valid_ratios,
         ) = super().forward(
-            src,
+            src,  # image feature
             src_key_padding_masks=src_key_padding_mask,
-            pos=src_pos,
-            prompt=prompt.transpose(0, 1),
+            pos=src_pos,  # image位置埋め込み
+            prompt=prompt.transpose(0, 1),  # Prompt encoding Ex: (1,34,256)
             prompt_key_padding_mask=prompt_key_padding_mask,
             encoder_extra_kwargs=encoder_extra_kwargs,
         )
@@ -563,7 +625,11 @@ class TransformerEncoderFusion(TransformerEncoder):
         }
 
 
-def pool_text_feat(prompt, prompt_mask, pool_with_mask):
+def pool_text_feat(
+    prompt: Tensor,
+    prompt_mask: Tensor | None,
+    pool_with_mask: bool,
+) -> Tensor:
     # prompt has shape (seq, bs, dim)
     if not pool_with_mask:
         return prompt.mean(dim=0)

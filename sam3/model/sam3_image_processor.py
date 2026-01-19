@@ -146,7 +146,9 @@ class Sam3Processor:
         geometric_prompt = self.model._get_dummy_prompt()
         with torch.profiler.record_function("SAM3Image._encode_prompt"):
             prompt_encoded, prompt_mask, backbone_out = self.model._encode_prompt(
-                backbone_out=state["backbone_out"], find_input=self.find_stage, geometric_prompt=geometric_prompt
+                backbone_out=state["backbone_out"],
+                find_input=self.find_stage,
+                geometric_prompt=geometric_prompt,
             )
 
         state["prompt"] = prompt_encoded
@@ -276,35 +278,48 @@ class Sam3Processor:
             find_target=None,
         )
 
-        out_bbox = outputs["pred_boxes"]
-        out_logits = outputs["pred_logits"]
-        out_masks = outputs["pred_masks"]
-        out_probs = out_logits.sigmoid()
-        presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
-        out_probs = (out_probs * presence_score).squeeze(-1)
+        # 予測されたcxcywh box
+        out_bbox: torch.Tensor = outputs["pred_boxes"]  # (num_queries, 4)
+        # TransformerのDecoder層の出力特徴量と、プロンプト特徴量の類似度logits
+        out_logits: torch.Tensor = outputs["pred_logits"]  # (num_queries,)
+        out_probs: torch.Tensor = out_logits.sigmoid()
 
+        out_masks: torch.Tensor = outputs["pred_masks"]  # (num_queries, H, W)
+
+        # TransformerDecoderの最後のlayerのpresence tokenの出力logits (bs=1,1)
+        presence_score: torch.Tensor = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)  # (1,1)
+        # 各queryのbox予測確率にpresence scoreを掛け合わせる
+        out_probs: torch.Tensor = (out_probs * presence_score).squeeze(-1)  # (num_queries,)
+
+        # filter by confidence threshold
         keep = out_probs > self.confidence_threshold
         out_probs = out_probs[keep]
         out_masks = out_masks[keep]
         out_bbox = out_bbox[keep]
 
         # convert to [x0, y0, x1, y1] format
-        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
+        boxes: torch.Tensor = box_ops.box_cxcywh_to_xyxy(out_bbox)  # (num_queries_filtered, 4)
 
-        img_h = state["original_height"]
-        img_w = state["original_width"]
+        img_h: int = state["original_height"]
+        img_w: int = state["original_width"]
+        # もとの画像サイズにスケーリング
         scale_fct = torch.tensor([img_w, img_h, img_w, img_h]).to(self.device)
         boxes = boxes * scale_fct[None, :]
 
+        # マスクをもとの画像サイズにリサイズしてsigmoidを適用
         out_masks = interpolate(
             out_masks.unsqueeze(1),
             (img_h, img_w),
             mode="bilinear",
             align_corners=False,
-        ).sigmoid()
+        ).sigmoid()  # (num_queries_filtered,1,H,W)
 
         state["masks_logits"] = out_masks
         state["masks"] = out_masks > 0.5
         state["boxes"] = boxes
         state["scores"] = out_probs
+
+        # (260119) pixel_embedもstateに保存しておく
+        state["pixel_embed"] = outputs["pixel_embed"]  # (1,256,H,W)
+
         return state
