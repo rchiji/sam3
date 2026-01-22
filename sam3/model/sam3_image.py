@@ -644,6 +644,8 @@ class Sam3Image(torch.nn.Module):
                 prompt_mask=prompt_mask,  # Ex: (1, 34)
                 encoder_out=encoder_out,
             )
+            # (260122) Transformer decoderの各layerの出力をstackしたものをoutに保存
+            out["decoder_hidden_states"] = hs
 
         # Run segmentation heads
         with torch.profiler.record_function("SAM3Image._run_segmentation_heads"):

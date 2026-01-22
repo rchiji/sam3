@@ -289,10 +289,10 @@ class Sam3Processor:
         # TransformerDecoderの最後のlayerのpresence tokenの出力logits (bs=1,1)
         presence_score: torch.Tensor = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)  # (1,1)
         # 各queryのbox予測確率にpresence scoreを掛け合わせる
-        out_probs: torch.Tensor = (out_probs * presence_score).squeeze(-1)  # (num_queries,)
+        out_probs: torch.Tensor = (out_probs * presence_score).squeeze(-1)  # (1, num_queries)
 
         # filter by confidence threshold
-        keep = out_probs > self.confidence_threshold
+        keep: torch.Tensor = out_probs > self.confidence_threshold  # (1, num_queries) bool
         out_probs = out_probs[keep]
         out_masks = out_masks[keep]
         out_bbox = out_bbox[keep]
@@ -322,5 +322,10 @@ class Sam3Processor:
 
         # (260119) pixel_embedもstateに保存しておく
         state["pixel_embed"] = outputs["pixel_embed"]  # (1,256,H,W)
+        # (260122) Transformer encoder,decoderのhidden statesもstateに保存しておく
+        # TransformerEncoderのhidden states (5184,1,256)
+        state["encoder_hidden_states"] = outputs["encoder_hidden_states"]
+        # TransformerDecoderの各layerの出力をstateに保存しておく (num_layers, bs, num_queries, d_model)
+        state["decoder_hidden_states"] = outputs["decoder_hidden_states"][:, :, keep.squeeze(0), :]
 
         return state
