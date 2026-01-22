@@ -101,7 +101,9 @@ class TransformerDecoderLayer(nn.Module):
             Tensor | None
         ) = None,  # pos for query. Sine(pos) 2D sinusoidal pos embedding (num_query,bs,256)
         tgt_key_padding_mask: Tensor | None = None,
-        tgt_reference_points: Tensor | None = None,  # (num_query,bs=1,4)
+        tgt_reference_points: (
+            Tensor | None
+        ) = None,  # (num_query,bs=1,4) 参照点（TransformerDecoder内の処理で毎layerで更新されていくけど、不使用やん）
         memory_text: Tensor | None = None,  # (num_token, bs, d_model) Prompt encodingの出力 Ex: (34,1,256)
         text_attention_mask: Tensor | None = None,  # (bs, num_token) Prompt encoding mask Ex: (1,34)
         # for memory
@@ -111,8 +113,8 @@ class TransformerDecoderLayer(nn.Module):
         memory_spatial_shapes: Tensor | None = None,  # (bs, num_levels, 2) # 各levelのh,w情報 (1,1,2)[72,72]
         memory_pos: Tensor | None = None,  # pos for memory
         # self attention  # 画像位置埋め込みにlevel埋め込みを加算したもの [5184,1,256]
-        self_attn_mask: Tensor | None = None,  # mask used for self-attention
-        cross_attn_mask: Tensor | None = None,  # mask used for cross-attention
+        self_attn_mask: Tensor | None = None,  # mask used for self-attention. None
+        cross_attn_mask: Tensor | None = None,  # mask used for cross-attention. not None
         # dac
         dac: bool = False,  # True
         dac_use_selfatt_ln: bool = True,
@@ -196,15 +198,18 @@ class TransformerDecoderLayer(nn.Module):
 
         # 4. Prompt encodingとのcross attention
         if self.use_text_cross_attention:
+            # cross attention
             tgt2: Tensor = self.ca_text(
-                self.with_pos_embed(tgt, tgt_query_pos),
-                memory_text,
-                memory_text,
+                query=self.with_pos_embed(tgt, tgt_query_pos),
+                key=memory_text,
+                value=memory_text,
                 key_padding_mask=text_attention_mask,
             )[
                 0
             ]  # <- nn.MHAの返り値がtupleなので[0]でTensorを取り出す
+            # DropOut or Identity
             tgt: Tensor = tgt + self.catext_dropout(tgt2)
+            # LayerNorm
             tgt: Tensor = self.catext_norm(tgt)
 
         if presence_token is not None:
@@ -274,7 +279,11 @@ class TransformerDecoder(nn.Module):
         """
         super().__init__()
         self.d_model: int = d_model  # 256
-        self.layers: list[TransformerDecoderLayer] = get_clones(layer, num_layers)
+        # TransformerDecoderLayerをnum_layers個copyしてModuleListに
+        self.layers: torch.nn.ModuleList = get_clones(
+            layer,
+            num_layers,
+        )
         self.fine_layers: list[nn.Module | None] = (
             get_clones(interaction_layer, num_layers) if interaction_layer is not None else [None] * num_layers
         )
@@ -296,11 +305,11 @@ class TransformerDecoder(nn.Module):
         self.bbox_embed: MLP = MLP(
             input_dim=d_model,
             hidden_dim=d_model,
-            output_dim=4,  # (x,y,w,h)への変換
+            output_dim=4,  # (cx,cy,w,h)用の4次元
             num_layers=3,
-        )
+        )  # (256 dim -> 4 dim)
 
-        # query indexを256次元に変換するembedding。このweightがdecoderの初期値になる
+        # query indexを256次元に変換するembedding。このweightをdecoderの初期値として使用するだけで、query_embedは訓練されない。
         self.query_embed: nn.Embedding = nn.Embedding(
             tot_num_queries,
             d_model,
@@ -460,13 +469,19 @@ class TransformerDecoder(nn.Module):
         5. boxRPB_embed_x / boxRPB_embed_y（MLP）で head数（n_heads）次元に落とす
         6. deltas_y.unsqueeze(3) + deltas_x.unsqueeze(2) で (H,W) を合成して
         7. 最終的に B: [bs, n_heads, num_queries, H*W] を作る
-        8. それを memory_mask として cross-attn に渡す（※名前は mask だけど実体は “bias”）
 
+        この関数の出力を memory_mask として cross-attn に渡す（※名前は mask だけど実体は “bias”）
         つまり boxRPB は **「参照boxに基づく2D相対位置バイアス」**をクロスアテンションに入れて、「このqueryは、このbox近辺（や内側）を見やすくする」みたいな誘導をしてます。
         """
         H, W = feat_size  # 72, 72
         boxes_xyxy: torch.Tensor = box_cxcywh_to_xyxy(reference_boxes).transpose(0, 1)  # (1,200,4)
+
+        bs: int  # 1
+        num_queries: int  # 200
         bs, num_queries, _ = boxes_xyxy.shape
+        self.compilable_cord_cache: tuple[
+            torch.Tensor, torch.Tensor
+        ]  # # 0-71の72個の要素を72で割って0-1に正規化した座標を取得
         if self.compilable_cord_cache is None:  # <-- initでcache済み
             self.compilable_cord_cache: tuple[torch.Tensor, torch.Tensor] = self._get_coords(
                 H,
@@ -485,6 +500,7 @@ class TransformerDecoder(nn.Module):
             # cache miss, will create compilation issue
             # In case we're not compiling, we'll still rely on the dict-based cache
             if feat_size not in self.coord_cache:
+                # このfeature size (72)での正規化座標(mesh grid)をcache
                 self.coord_cache[feat_size] = self._get_coords(H, W, reference_boxes.device)
             coords_h, coords_w = self.coord_cache[feat_size]
 
@@ -499,8 +515,10 @@ class TransformerDecoder(nn.Module):
         deltas_x: torch.Tensor = deltas_x.view(bs, num_queries, -1, 2)  # (1,200,72,2)
 
         if self.boxRPB in ["log", "both"]:
-            # 1. 8倍
-            # 2. sine変換 * log2p / 4
+            # 相対位置（Δx, Δy）を “符号付きログ圧縮” して、近距離は細かく・遠距離は粗く扱える特徴量に変換
+            # 1. 8倍してlog2 -> 0から離れているほど値が大きく出やすい
+            # 2. signで正or負を取り出し 1 or -1
+            # 3. log2(8)で割れば大体元のscale (-1~1あたり)に戻る
 
             deltas_x_log: torch.Tensor = deltas_x * 8  # normalize to -8, 8
             deltas_x_log: torch.Tensor = (
@@ -542,7 +560,7 @@ class TransformerDecoder(nn.Module):
             assert B.shape[:4] == (bs, num_queries, H, W)
 
         B: torch.Tensor = B.flatten(2, 3)  # (bs=1,num_queries=200,H*W=5184,n_heads=8)
-        B: torch.Tensor = B.permute(0, 3, 1, 2)  # (bs, n_heads, num_queries, H*W)
+        B: torch.Tensor = B.permute(0, 3, 1, 2)  # (bs=1,n_heads=8, num_queries=200, H*W=5184)
         B: torch.Tensor = B.contiguous()  # memeff attn likes ordered strides
         if not torch.compiler.is_dynamo_compiling():
             assert B.shape[2:] == (num_queries, H * W)
@@ -562,7 +580,9 @@ class TransformerDecoder(nn.Module):
         reference_boxes: Tensor | None = None,  # None (num_queries,bs,4)
         # for memory
         level_start_index: Tensor | None = None,  # TransformerEncoderの出力。"level_start_index" num_levels=1
-        spatial_shapes: Tensor | None = None,  # TransformerEncoderの出力。"spatial_shapes" (bs=1,num_levels=1,2)
+        spatial_shapes: (
+            Tensor | None
+        ) = None,  # TransformerEncoderの出力。"spatial_shapes" (bs=1,num_levels=1,2) (72,72)
         valid_ratios: Tensor | None = None,  # TransformerEncoderの出力。"valid_ratios"
         # for text
         memory_text: Tensor | None = None,  # Prompt encoding Ex: (34,1,256) not None
@@ -615,9 +635,9 @@ class TransformerDecoder(nn.Module):
             # nn.Embedding (200->4) の weightをsigmoidで0-1に変換したものを参照点として使う
             if reference_boxes is None:  # <-- True
                 # In this case, we're in a one-stage model, so we generate the reference boxes
-                # nn.Embedding (200->4) の weight を参照点として使う
+                # nn.Embedding (200->4) の weight を参照点の初期値として使う
                 reference_boxes: Tensor = self.reference_points.weight.unsqueeze(1)  # (200,1,4)
-                # 2倍に拡張 (400,1,4)
+                # DAC時は2倍に拡張 (400,1,4) <-- 推論では不使用
                 reference_boxes: Tensor = (
                     reference_boxes.repeat(2, bs, 1) if apply_dac else reference_boxes.repeat(1, bs, 1)
                 )
@@ -657,7 +677,7 @@ class TransformerDecoder(nn.Module):
             )  # (nq=200,bs=1,nlevel=1,4)
 
             ## 2. 現在の候補参照点を基に位置埋め込みを計算
-            # Sinusoidal positional embeddingの2D版を生成 x,y,w,h各々に対して128次元ずつで合計512次元
+            # Sinusoidal positional embeddingの2D版を生成 cx,cy,w,h各々に対して128次元ずつで合計512次元
             query_sine_embed: Tensor = gen_sineembed_for_position(
                 reference_points_input[:, :, 0, :], self.d_model
             )  # (nq,bs,d_model*2 =512)
@@ -665,15 +685,15 @@ class TransformerDecoder(nn.Module):
             ## 3. 位置埋め込みを次元削減しつつ、trainableな埋め込みに変換
             # conditional query
             # Sinusoidal positional embeddingをMLPで256次元に変換
-            query_pos: Tensor = self.ref_point_head(query_sine_embed)  # nq, bs, d_model
+            query_pos: Tensor = self.ref_point_head(query_sine_embed)  # (nq=200,bs=1,d_model=256)
 
             if self.boxRPB != "none" and reference_boxes is not None:  # <-- True
                 assert spatial_shapes.shape[0] == 1, "only single scale support implemented"
 
-                ## 4. boxRPB。候補boxの相対位置バイアスを計算（trainable）
+                ## 4. boxRPB。候補boxの相対位置バイアスをMLPしてcross attentionのattn_mask作成。headごとにweightを変えたもの。
                 memory_mask: Tensor = self._get_rpb_matrix(
                     reference_boxes,
-                    (spatial_shapes[0, 0], spatial_shapes[0, 1]),
+                    (spatial_shapes[0, 0], spatial_shapes[0, 1]),  # (72,72)
                 )  # (bs=1, n_heads=8, nq=200, H*W=5184)
                 memory_mask: Tensor = memory_mask.flatten(0, 1)  # (bs*n_heads=8, nq=200, H*W=5184)
 
@@ -681,12 +701,14 @@ class TransformerDecoder(nn.Module):
                 assert self.use_act_checkpoint, "Activation checkpointing not enabled in the decoder"
 
             ## 5. TransformerDecoderLayerのforwardを呼び出し
+            output: torch.Tensor  # (200,1,256)
+            presence_out: torch.Tensor  # (1,1,256)
             output, presence_out = activation_ckpt_wrapper(layer)(
                 tgt=output,  # nn.Embedding.weight (200,1,256) or 前のlayerのoutput
                 tgt_query_pos=query_pos,  # query_pos (200,1,256)
                 tgt_query_sine_embed=query_sine_embed,  # (200,1,512) # <-- 不使用
                 tgt_key_padding_mask=tgt_key_padding_mask,  # None
-                tgt_reference_points=reference_points_input,  # 現在の候補参照点 (200,1,1,4)
+                tgt_reference_points=reference_points_input,  # 現在の候補参照点 (200,1,1,4) ※ 毎layerで更新したものを渡しているけど、layerのfowardには不使用。
                 memory_text=memory_text,  # Prompt encoding Ex: (34,1,256) not None
                 text_attention_mask=text_attention_mask,  # Prompt encoding mask Ex: (1,34) not None
                 memory=memory,  # TransformerEncoderの出力。encoder_hidden_state [5184,1,256]
@@ -698,7 +720,7 @@ class TransformerDecoder(nn.Module):
                 cross_attn_mask=memory_mask,  # (bs*n_heads=8, nq=200, H*W=5184)
                 dac=apply_dac,  # True
                 dac_use_selfatt_ln=self.dac_use_selfatt_ln,  # True
-                presence_token=presence_out,  # presence token (1,1,256) or None
+                presence_token=presence_out,  # 前のlayerのpresence token (1,1,256)
                 **(decoder_extra_kwargs or {}),
                 act_ckpt_enable=self.training and self.use_act_checkpoint,
                 # ROI memory bank

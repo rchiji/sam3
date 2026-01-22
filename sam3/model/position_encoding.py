@@ -13,6 +13,8 @@ class PositionEmbeddingSine(nn.Module):
     """
     This is a more standard version of the position embedding, very similar to the one
     used by the Attention is all you need paper, generalized to work on images.
+
+    sinusoidal positional embedding（2D版）
     """
 
     def __init__(
@@ -62,12 +64,8 @@ class PositionEmbeddingSine(nn.Module):
 
         pos_x = x_embed[:, None] / dim_t
         pos_y = y_embed[:, None] / dim_t
-        pos_x = torch.stack(
-            (pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()), dim=2
-        ).flatten(1)
-        pos_y = torch.stack(
-            (pos_y[:, 0::2].sin(), pos_y[:, 1::2].cos()), dim=2
-        ).flatten(1)
+        pos_x = torch.stack((pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()), dim=2).flatten(1)
+        pos_y = torch.stack((pos_y[:, 0::2].sin(), pos_y[:, 1::2].cos()), dim=2).flatten(1)
         return pos_x, pos_y
 
     @torch.no_grad()
@@ -89,37 +87,63 @@ class PositionEmbeddingSine(nn.Module):
 
     @torch.no_grad()
     def forward(self, x):
+        """
+        sinusoidal position embeddingの2D版を生成
+
+        位置埋め込み用のtensorを生成
+        xはH,W,Batch sizeを知るために使用しているだけ
+        """
         cache_key = None
         cache_key = (x.shape[-2], x.shape[-1])
         if cache_key in self.cache:
             return self.cache[cache_key][None].repeat(x.shape[0], 1, 1, 1)
-        y_embed = (
-            torch.arange(1, x.shape[-2] + 1, dtype=torch.float32, device=x.device)
+
+        y_embed: torch.Tensor = (
+            torch.arange(
+                1,
+                x.shape[-2] + 1,
+                dtype=torch.float32,
+                device=x.device,
+            )
             .view(1, -1, 1)
             .repeat(x.shape[0], 1, x.shape[-1])
         )
         x_embed = (
-            torch.arange(1, x.shape[-1] + 1, dtype=torch.float32, device=x.device)
+            torch.arange(
+                1,
+                x.shape[-1] + 1,
+                dtype=torch.float32,
+                device=x.device,
+            )
             .view(1, 1, -1)
             .repeat(x.shape[0], x.shape[-2], 1)
         )
 
         if self.normalize:
+            # 0-1に正規化
             eps = 1e-6
             y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
             x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
 
-        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+        # 周波数成分の計算
+        dim_t = torch.arange(
+            self.num_pos_feats,
+            dtype=torch.float32,
+            device=x.device,
+        )
         dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
 
+        # 周波数成分で割る
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
-        pos_x = torch.stack(
-            (pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4
-        ).flatten(3)
-        pos_y = torch.stack(
-            (pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4
-        ).flatten(3)
+
+        # x成分の位置埋め込み
+        pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
+
+        # y成分の位置埋め込み
+        pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
+
+        # 合成
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
         if cache_key is not None:
             self.cache[cache_key] = pos[0]

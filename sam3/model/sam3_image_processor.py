@@ -315,6 +315,7 @@ class Sam3Processor:
         ).sigmoid()  # (num_queries_filtered,1,H,W)
 
         state["masks_logits"] = out_masks
+        # binary maskの閾値は0.5で固定されてるわ。
         state["masks"] = out_masks > 0.5
         state["boxes"] = boxes
         state["scores"] = out_probs

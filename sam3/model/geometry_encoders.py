@@ -625,7 +625,11 @@ class SequenceGeometryEncoder(nn.Module):
         # If we encode boxes as points, we have 3 types of points: regular, top left, bottom right
         # These 3 types can be positives or negatives, hence 2*3 = 6 labels
         num_labels = 6 if self.encode_boxes_as_points else 2
-        self.label_embed: torch.nn.Embedding = torch.nn.Embedding(num_labels, self.d_model)
+        # fgかbgかのlabelを256次元に埋め込む
+        self.label_embed: torch.nn.Embedding = torch.nn.Embedding(
+            num_labels,
+            self.d_model,
+        )
 
         # This is a cls token, can be used for pooling if need be.
         # It also ensures that the encoded sequences are always non-empty
@@ -658,17 +662,27 @@ class SequenceGeometryEncoder(nn.Module):
         if not encode_boxes_as_points:
             if boxes_direct_project:
                 # 4次元(box座標) → 256次元に線形変換
-                self.boxes_direct_project: torch.nn.Linear = nn.Linear(4, self.d_model)
+                self.boxes_direct_project: torch.nn.Linear = nn.Linear(
+                    4,
+                    self.d_model,
+                )
             if boxes_pool:
                 # ROI Alignで特徴量マップからbox位置の情報を抽出して256次元に変換
-                self.boxes_pool_project: torch.nn.Conv2d = nn.Conv2d(self.d_model, self.d_model, self.roi_size)
+                self.boxes_pool_project: torch.nn.Conv2d = nn.Conv2d(
+                    self.d_model,
+                    self.d_model,
+                    self.roi_size,
+                )
             if boxes_pos_enc:
                 # boxの位置エンコードを256次元に変換
-                self.boxes_pos_enc_project: torch.nn.Linear = nn.Linear(self.d_model + 2, self.d_model)
+                self.boxes_pos_enc_project: torch.nn.Linear = nn.Linear(
+                    self.d_model + 2,
+                    self.d_model,
+                )
 
         ## ----- Final projection -----
         self.final_proj = None
-        if add_post_encode_proj:
+        if add_post_encode_proj:  # <-- True
             # 変換後の特徴量をさらに256次元に変換する線形層
             self.final_proj: torch.nn.Linear = nn.Linear(self.d_model, self.d_model)
             # LayerNormも追加
@@ -839,7 +853,7 @@ class SequenceGeometryEncoder(nn.Module):
             else:
                 boxes_embed = boxes_embed + proj
 
-        type_embed = self.label_embed(boxes_labels.long())
+        type_embed: torch.Tensor = self.label_embed(boxes_labels.long())
         return type_embed + boxes_embed, boxes_mask
 
     def _encode_masks(
@@ -894,6 +908,7 @@ class SequenceGeometryEncoder(nn.Module):
         masks_mask: torch.Tensor = geo_prompt.mask_mask
         masks_labels: torch.Tensor = geo_prompt.mask_labels
 
+        # token軸を先頭にしたtensorを用意
         seq_first_img_feats: torch.Tensor = img_feats[-1]  # [H*W, B, C]
         seq_first_img_pos_embeds: torch.Tensor = (
             img_pos_embeds[-1] if img_pos_embeds is not None else torch.zeros_like(seq_first_img_feats)
@@ -915,7 +930,7 @@ class SequenceGeometryEncoder(nn.Module):
 
         ## box promptをpoint promptとして扱う場合
         # box座標をtop-left, bottom-rightの2点に変換してpoint promptとして扱う
-        if self.encode_boxes_as_points:
+        if self.encode_boxes_as_points:  # <-- False
             assert boxes is not None
             assert geo_prompt.box_mask is not None
             assert geo_prompt.box_labels is not None
@@ -1006,12 +1021,12 @@ class SequenceGeometryEncoder(nn.Module):
                 ),
             )
 
-        ## ここでやっと、Transformerエンコード
+        ## ここでやっと、TransformerEncoderLayer
         if self.encode is not None:
             for lay in self.encode:
                 final_embeds = activation_ckpt_wrapper(lay)(
                     tgt=final_embeds,
-                    memory=seq_first_img_feats,
+                    memory=seq_first_img_feats, # <-- 画像特徴マップとcross-attention
                     tgt_key_padding_mask=final_mask,
                     pos=seq_first_img_pos_embeds,
                     act_ckpt_enable=self.training and self.use_act_ckpt,

@@ -440,7 +440,7 @@ class UniversalSegmentationHead(SegmentationHead):
         bs: int = encoder_hidden_states.shape[1]
 
         ## 1. encoder_hidden_statesとprompt encodingをCross attention
-        if self.cross_attend_prompt is not None:
+        if self.cross_attend_prompt is not None:  # <-- True
             # 1.1 LayerNorm
             tgt2: torch.Tensor = self.cross_attn_norm(encoder_hidden_states)
             # 1.2 Cross Attention
@@ -453,7 +453,7 @@ class UniversalSegmentationHead(SegmentationHead):
                 0
             ]  # <-- 返り値がタプルなので[0]で取り出す
             # 1.3 Residual connection
-            encoder_hidden_states = tgt2 + encoder_hidden_states
+            encoder_hidden_states: torch.Tensor = tgt2 + encoder_hidden_states
 
         ## 2. Presence headで各object queryの存在確率を予測
         presence_logit = None

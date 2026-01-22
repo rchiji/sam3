@@ -340,8 +340,9 @@ class Sam3Image(torch.nn.Module):
 
         ## 1. decoderのinputの用意
         # ただ初期値として使うだけで、このquery_embed自体は学習されないし、再利用されない。
-        # self.transformer.decoder.query_embedはnn.Embedding(200,256)で定義されている
+        # self.transformer.decoder.query_embedはnn.Embedding(200,256)。このweightを拝借。（正規分布で初期化されている）
         query_embed: torch.Tensor = self.transformer.decoder.query_embed.weight  # (200,256)
+        # Decoderの初期input
         tgt: torch.Tensor = query_embed.unsqueeze(1).repeat(1, bs, 1)  # (200,1,256)
 
         ## 2. decoderの実行

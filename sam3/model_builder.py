@@ -261,16 +261,16 @@ def _create_geometry_encoder() -> SequenceGeometryEncoder:
         d_model=256,
         dim_feedforward=2048,
         dropout=0.1,
-        pos_enc_at_attn=False,
-        pre_norm=True,
+        pos_enc_at_attn=False,  # <-- self-attentionで位置埋め込み (query pos)を加算するかどうか
+        pre_norm=True,  # <-- forward_preを使用
         self_attention=MultiheadAttention(
             num_heads=8,
             dropout=0.1,
             embed_dim=256,
             batch_first=False,
         ),
-        pos_enc_at_cross_attn_queries=False,
-        pos_enc_at_cross_attn_keys=True,
+        pos_enc_at_cross_attn_queries=False,  # <-- cross-attentionで位置埋め込み (pos)をqueryに加算するかどうか
+        pos_enc_at_cross_attn_keys=True,  # <-- cross-attentionで位置埋め込み (pos)をkeyに加算するかどうか
         cross_attention=MultiheadAttention(
             num_heads=8,
             dropout=0.1,

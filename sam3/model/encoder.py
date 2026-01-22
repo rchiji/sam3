@@ -117,7 +117,13 @@ class TransformerEncoderLayer(nn.Module):
         q = k = tgt + query_pos if self.pos_enc_at_attn else tgt
 
         # Self attention
-        tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask, key_padding_mask=tgt_key_padding_mask)[0]
+        tgt2 = self.self_attn(
+            q,
+            k,
+            value=tgt,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+        )[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
@@ -147,7 +153,7 @@ class TransformerEncoderLayer(nn.Module):
         memory_mask: Tensor | None = None,
         tgt_key_padding_mask: Tensor | None = None,
         memory_key_padding_mask: Tensor | None = None,
-        pos: Tensor | None = None,
+        pos: Tensor | None = None,  # 位置埋め込み用tensor
         query_pos: Tensor | None = None,
         # attn_bias: Optional[Tensor] = None,
         # **kwargs,
@@ -181,14 +187,15 @@ class TransformerEncoderLayer(nn.Module):
             other_tgt = tgt[tgt.shape[0] // 2 :]
             tgt = tgt[: tgt.shape[0] // 2]
 
+        ## ---- Self attention ----
         # LayerNorm
         tgt2: torch.Tensor = self.norm1(tgt)
         # query, keyの用意 for self-attention。オプションで位置埋め込みを加算
         q = k = tgt2 + query_pos if self.pos_enc_at_attn else tgt2
         # MHA
         tgt2: torch.Tensor = self.self_attn(
-            q,
-            k,
+            query=q,
+            key=k,
             value=tgt2,
             attn_mask=tgt_mask,
             key_padding_mask=tgt_key_padding_mask,
@@ -202,6 +209,7 @@ class TransformerEncoderLayer(nn.Module):
             # Recombine
             tgt: torch.Tensor = torch.cat((tgt, other_tgt), dim=0)
 
+        ## ---- Cross attention ----
         # LayerNorm
         tgt2: torch.Tensor = self.norm2(tgt)
         ## Cross attention to promt encoding
@@ -216,6 +224,8 @@ class TransformerEncoderLayer(nn.Module):
         )[
             0
         ]  # (1,5184,256)
+
+        ## ---- FFN ----
         tgt: torch.Tensor = tgt + self.dropout2(tgt2)
         tgt2: torch.Tensor = self.norm3(tgt)
         tgt2: torch.Tensor = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
@@ -588,7 +598,7 @@ class TransformerEncoderFusion(TransformerEncoder):
         else:
             assert all(x.dim == 4 for x in src), "expected list of (bs, c, h, w) tensors"
 
-        if self.add_pooled_text_to_img_feat:
+        if self.add_pooled_text_to_img_feat:  # <-- 不使用
             # Fusion: Add mean pooled text to image features
             pooled_text: Tensor = pool_text_feat(
                 prompt,

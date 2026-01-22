@@ -117,8 +117,11 @@ class Sam3DualViTDetNeck(nn.Module):
         # 最後のblockの出力を取得
         x: torch.Tensor = xs[-1]  # simpleFPN
         for i in range(len(self.convs)):
+            # 特徴量を畳み込み処理
             sam3_x_out: torch.Tensor = self.convs[i](x)
+            # このshapeでのsinusoidal positional embeddingを生成
             sam3_pos_out: torch.Tensor = self.position_encoding(sam3_x_out).to(sam3_x_out.dtype)
+
             sam3_out.append(sam3_x_out)
             sam3_pos.append(sam3_pos_out)
 
