@@ -9,11 +9,12 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
+from sam3.model.text_encoder_ve import VETextEncoder
 
 from .act_ckpt_utils import activation_ckpt_wrapper
 from .necks import Sam3DualViTDetNeck
-from sam3.model.text_encoder_ve import VETextEncoder
 
 
 class SAM3VLBackbone(nn.Module):
@@ -128,7 +129,8 @@ class SAM3VLBackbone(nn.Module):
                 "backbone_fpn": sam2_features,
             }
 
-        sam3_src = sam3_features[-1]
+        # 最後の出力のみをsam3_srcとして使用
+        sam3_src = sam3_features[-1]  # (256,72,72)
         output: dict[str, torch.Tensor | None] = {
             "vision_features": sam3_src,
             "vision_pos_enc": sam3_pos,
