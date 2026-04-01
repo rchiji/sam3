@@ -372,11 +372,12 @@ class TransformerDecoder(nn.Module):
             # 事前に解像度情報から正規化座標を計算してキャッシュしておく
             if resolution is not None and stride is not None:
                 feat_size: int = resolution // stride  # 1008 // 14 = 72
+                cache_device: str = "cuda" if torch.cuda.is_available() else "cpu"
                 # 0-71の72個の要素を72で割って0-1に正規化した座標を取得
                 coords_h, coords_w = self._get_coords(
                     feat_size,  # 72
                     feat_size,  # 72
-                    device="cuda",
+                    device=cache_device,
                 )
                 self.compilable_cord_cache: tuple[torch.Tensor, torch.Tensor] = (coords_h, coords_w)
                 self.compilable_stored_size: tuple[int, int] = (feat_size, feat_size)
@@ -482,7 +483,11 @@ class TransformerDecoder(nn.Module):
         self.compilable_cord_cache: tuple[
             torch.Tensor, torch.Tensor
         ]  # # 0-71の72個の要素を72で割って0-1に正規化した座標を取得
-        if self.compilable_cord_cache is None:  # <-- initでcache済み
+        if (
+            self.compilable_cord_cache is None
+            or self.compilable_stored_size != (H, W)
+            or any(coord.device != reference_boxes.device for coord in self.compilable_cord_cache)
+        ):
             self.compilable_cord_cache: tuple[torch.Tensor, torch.Tensor] = self._get_coords(
                 H,
                 W,
